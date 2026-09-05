@@ -16,6 +16,8 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser = sub.add_parser("apply", help="apply a saved profile by name")
     apply_parser.add_argument("name")
 
+    sub.add_parser("gui", help="launch the GUI")
+
     args = parser.parse_args(argv)
 
     if args.command == "apply":
@@ -33,5 +35,9 @@ def main(argv: list[str] | None = None) -> int:
             print(outcome.message, file=sys.stderr)
             return 1
         return 0
+
+    if args.command == "gui":
+        from bspwm_display_manager.ui.app import run
+        return run()
 
     return 1
