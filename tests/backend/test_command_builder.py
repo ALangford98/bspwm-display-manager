@@ -50,3 +50,12 @@ def test_build_scale_env_150_percent():
     assert env["GDK_SCALE"] == "1.5"
     assert env["QT_SCALE_FACTOR"] == "1.5"
     assert env["Xft.dpi"] == "144"
+
+
+def test_build_scale_env_rounds_rather_than_truncates_non_quarter_percentages():
+    """110% -> 96*1.1 = 105.6. int() truncates to 105 (silently 1 dpi
+    low); the correct, non-biased value is round() -> 106. Only
+    percentages that are multiples of 25 land on an exact integer, so
+    this regression would not be caught by the 100%/150% tests above."""
+    env = build_scale_env(110)
+    assert env["Xft.dpi"] == "106"

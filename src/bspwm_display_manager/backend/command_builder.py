@@ -32,7 +32,7 @@ def build_scale_env(percent: int) -> dict[str, str]:
         "GDK_SCALE": _trim(factor),
         "QT_SCALE_FACTOR": _trim(factor),
         "QT_AUTO_SCREEN_SCALE_FACTOR": "0",
-        "Xft.dpi": str(int(_BASE_DPI * factor)),
+        "Xft.dpi": str(round(_BASE_DPI * factor)),
     }
 
 
