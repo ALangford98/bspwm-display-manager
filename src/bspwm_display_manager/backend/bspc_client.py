@@ -27,26 +27,34 @@ def desktop_exists(name: str) -> bool:
     return _run(["query", "-D", "-d", name]).returncode == 0
 
 
-def move_desktop_to_monitor(desktop: str, target: str) -> None:
-    _run(["desktop", desktop, "--to-monitor", target])
+def desktop_is_empty(name: str) -> bool:
+    result = _run(["query", "-N", "-d", name, "-n", ".window"])
+    return result.stdout.strip() == ""
 
 
-def add_desktop(monitor: str, name: str) -> None:
-    _run(["monitor", monitor, "-a", name])
+def move_desktop_to_monitor(desktop: str, target: str) -> bool:
+    return _run(["desktop", desktop, "--to-monitor", target]).returncode == 0
 
 
-def remove_desktop(name: str) -> None:
-    _run(["desktop", name, "-r"])
+def add_desktop(monitor: str, name: str) -> bool:
+    return _run(["monitor", monitor, "-a", name]).returncode == 0
 
 
-def remove_monitor(name: str) -> None:
-    _run(["monitor", name, "-r"])
+def remove_desktop(name: str) -> bool:
+    return _run(["desktop", name, "-r"]).returncode == 0
 
 
-def reset_padding(monitor: str) -> None:
+def remove_monitor(name: str) -> bool:
+    return _run(["monitor", name, "-r"]).returncode == 0
+
+
+def reset_padding(monitor: str) -> bool:
+    ok = True
     for edge in _PADDING_EDGES:
-        _run(["config", "-m", monitor, edge, "0"])
+        if _run(["config", "-m", monitor, edge, "0"]).returncode != 0:
+            ok = False
+    return ok
 
 
-def reorder_monitors(order: list[str]) -> None:
-    _run(["wm", "-O", *order])
+def reorder_monitors(order: list[str]) -> bool:
+    return _run(["wm", "-O", *order]).returncode == 0
