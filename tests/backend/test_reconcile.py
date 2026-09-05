@@ -77,13 +77,26 @@ def test_assign_desktops_never_calls_bspc_monitor_dash_d():
     real desktop_exists/move_desktop_to_monitor/add_desktop code paths
     run and their real argv reaches this assertion; mocking bspc_client
     itself here would make the assertion vacuous (nothing would ever
-    reach `-d` no matter what assign_desktops did)."""
-    fake = MagicMock(returncode=0, stdout="", stderr="")
-    with patch("subprocess.run", return_value=fake) as run:
+    reach `-d` no matter what assign_desktops did).
+
+    A plain `return_value=` stub (returncode=0 for every call) would
+    make `desktop_exists` report every name as existing, so only the
+    `--to-monitor` branch would ever run and the `-a` (create) branch —
+    the exact branch a `-a` vs `-d` typo would land in — would go
+    completely unexercised, closing a coverage gap without noticing.
+    This `side_effect` makes 'settings' report as not-existing so the
+    create branch genuinely executes too, under the same assertion."""
+    def _fake_run(argv, **kwargs):
+        if argv[:4] == ["bspc", "query", "-D", "-d"] and argv[4] == "settings":
+            return MagicMock(returncode=1, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_fake_run) as run:
         rc.assign_desktops("DP-1", ["pm", "office", "settings"])
-    assert run.call_count > 0  # confirms real bspc_client code actually ran
-    for call in run.call_args_list:
-        argv = call.args[0]
+    calls = [call.args[0] for call in run.call_args_list]
+    assert ["bspc", "desktop", "pm", "--to-monitor", "DP-1"] in calls
+    assert ["bspc", "monitor", "DP-1", "-a", "settings"] in calls  # confirms the create branch ran
+    for argv in calls:
         assert not (argv[:2] == ["bspc", "monitor"] and "-d" in argv)
 
 
