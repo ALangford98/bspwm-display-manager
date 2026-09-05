@@ -1406,7 +1406,7 @@ EOF
 
 ```python
 # tests/backend/test_reconcile.py
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from bspwm_display_manager.backend import reconcile as rc
 
@@ -1467,11 +1467,16 @@ def test_assign_desktops_never_calls_bspc_monitor_dash_d():
     """Regression guard for the documented bug: `bspc monitor -d <fewer
     names>` silently folds dropped desktops into the last name in the new
     list instead of handing them to another monitor. This module must
-    never construct that call at all."""
-    with patch("bspwm_display_manager.backend.reconcile.bspc_client.desktop_exists", return_value=True), \
-         patch("bspwm_display_manager.backend.reconcile.bspc_client.move_desktop_to_monitor"), \
-         patch("subprocess.run") as run:
+    never construct that call at all. Deliberately does NOT mock
+    bspc_client's functions — only the true subprocess boundary — so the
+    real desktop_exists/move_desktop_to_monitor/add_desktop code paths
+    run and their real argv reaches this assertion; mocking bspc_client
+    itself here would make the assertion vacuous (nothing would ever
+    reach `-d` no matter what assign_desktops did)."""
+    fake = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("subprocess.run", return_value=fake) as run:
         rc.assign_desktops("DP-1", ["pm", "office", "settings"])
+    assert run.call_count > 0  # confirms real bspc_client code actually ran
     for call in run.call_args_list:
         argv = call.args[0]
         assert not (argv[:2] == ["bspc", "monitor"] and "-d" in argv)
@@ -2023,6 +2028,18 @@ def test_apply_missing_profile_returns_nonzero(capsys):
         code = main(["apply", "nonexistent"])
     assert code == 1
     assert "no profile" in capsys.readouterr().err
+
+
+def test_apply_prints_error_when_profile_outputs_do_not_match_connected_monitors(capsys):
+    """E.g. running `apply work` while undocked — resolve_targets raises
+    ValueError instead of returning an ApplyOutcome. Must not be an
+    uncaught traceback on a keyboard shortcut."""
+    with patch("bspwm_display_manager.cli.profile_store.load", return_value=object()), \
+         patch("bspwm_display_manager.cli.apply.replay_profile",
+               side_effect=ValueError("no connected output matches 'edid-dell'")):
+        code = main(["apply", "work"])
+    assert code == 1
+    assert "no connected output matches" in capsys.readouterr().err
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2060,7 +2077,11 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        outcome = apply.replay_profile(profile)
+        try:
+            outcome = apply.replay_profile(profile)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         if not outcome.ok:
             print(outcome.message, file=sys.stderr)
             return 1
@@ -2072,7 +2093,7 @@ def main(argv: list[str] | None = None) -> int:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_cli.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 5: Verify the console script resolves**
 
@@ -2500,7 +2521,8 @@ from bspwm_display_manager.backend.models import Output
 class OutputPanel(QWidget):
     def __init__(self):
         super().__init__()
-        self._output: Output | None = None
+        self.output: Output | None = None  # public: main_window reads this
+        # to know which output the panel's current edits apply to.
         self.mode_combo = QComboBox()
         self.rate_combo = QComboBox()
         self.primary_checkbox = QCheckBox("Primary")
@@ -2521,7 +2543,7 @@ class OutputPanel(QWidget):
         layout.addRow("Per-output scale", self.scale_spin)
 
     def set_output(self, output: Output) -> None:
-        self._output = output
+        self.output = output
         self.mode_combo.clear()
         seen_resolutions: list[tuple[int, int]] = []
         for mode in output.modes:
@@ -2538,16 +2560,16 @@ class OutputPanel(QWidget):
         self._refresh_rate_choices()
 
     def _refresh_rate_choices(self) -> None:
-        if self._output is None:
+        if self.output is None:
             return
         res = self.mode_combo.currentData()
         self.rate_combo.clear()
         if res is None:
             return
-        for mode in self._output.modes:
+        for mode in self.output.modes:
             if (mode.width, mode.height) == res:
                 self.rate_combo.addItem(f"{mode.rate:g}Hz", mode.rate)
-        current = self._output.current_mode()
+        current = self.output.current_mode()
         if current is not None and (current.width, current.height) == res:
             idx = self.rate_combo.findData(current.rate)
             if idx >= 0:
@@ -2827,7 +2849,7 @@ EOF
 - Produces:
   - `remaining_seconds(elapsed: int, timeout: int) -> int` (pure, tested
     with no Qt involvement)
-  - `ApplyConfirmDialog(QDialog)`, constructed with `timeout_seconds: int = 15`
+  - `ApplyConfirmDialog(QDialog)`, constructed with `timeout_seconds: int = 15, parent=None` (the `parent` kwarg is required so Task 18's `MainWindow` can pass `parent=self`)
     - `start() -> None` — begins the countdown
     - `was_confirmed() -> bool`
 
@@ -2886,8 +2908,8 @@ def remaining_seconds(elapsed: int, timeout: int) -> int:
 
 
 class ApplyConfirmDialog(QDialog):
-    def __init__(self, timeout_seconds: int = 15):
-        super().__init__()
+    def __init__(self, timeout_seconds: int = 15, parent=None):
+        super().__init__(parent)
         self.timeout_seconds = timeout_seconds
         self._elapsed = 0
         self._confirmed = False
@@ -3015,7 +3037,7 @@ from PySide6.QtWidgets import (
 
 from bspwm_display_manager.backend import apply, bspc_client, edid, profile_store
 from bspwm_display_manager.backend import xrandr_client, xrandr_parser
-from bspwm_display_manager.backend.models import Output
+from bspwm_display_manager.backend.models import Mode, Output
 from bspwm_display_manager.backend.profile import OutputSpec, Profile
 from bspwm_display_manager.ui.apply_dialog import ApplyConfirmDialog
 from bspwm_display_manager.ui.canvas import DisplayCanvas
@@ -3032,6 +3054,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("bspwm Display Manager")
 
         self.canvas = DisplayCanvas()
+        self.output_select_combo = QComboBox()
         self.output_panel = OutputPanel()
         self.scale_control = SessionScaleControl()
         self.desktop_panel = DesktopAssignmentPanel()
@@ -3040,11 +3063,13 @@ class MainWindow(QMainWindow):
         self.load_combo = QComboBox()
         self.load_button = QPushButton("Load")
 
+        self.output_select_combo.currentTextChanged.connect(self._on_output_selected)
         self.apply_button.clicked.connect(self._on_apply)
         self.save_button.clicked.connect(self._on_save)
         self.load_button.clicked.connect(self._on_load)
 
         side = QVBoxLayout()
+        side.addWidget(self.output_select_combo)
         side.addWidget(self.output_panel)
         side.addWidget(self.scale_control)
         side.addWidget(self.desktop_panel)
@@ -3075,6 +3100,11 @@ class MainWindow(QMainWindow):
 
         self.canvas.set_outputs(connected)
         self.scale_control.set_outputs(connected)
+
+        self.output_select_combo.blockSignals(True)
+        self.output_select_combo.clear()
+        self.output_select_combo.addItems([o.name for o in connected])
+        self.output_select_combo.blockSignals(False)
         if connected:
             self.output_panel.set_output(connected[0])
 
@@ -3087,16 +3117,40 @@ class MainWindow(QMainWindow):
         self.load_combo.clear()
         self.load_combo.addItems(profile_store.list_profiles(PROFILES_DIR))
 
+    def _on_output_selected(self, name: str) -> None:
+        match = next((o for o in self._last_good_outputs if o.name == name), None)
+        if match is not None:
+            self.output_panel.set_output(match)
+
     def _collect_outputs_for_apply(self) -> list[Output]:
+        """Builds the outputs to apply: each output's last-known geometry,
+        with the canvas's dragged position and — for whichever output is
+        currently loaded in output_panel — that panel's edited
+        mode/rate/primary/scale merged in. output_panel edits only one
+        output at a time; _on_output_selected keeps it in sync with
+        output_select_combo."""
         positions = self.canvas.positions()
+        selected = self.output_panel.output
+        selection = self.output_panel.current_selection() if selected is not None else None
+
         outputs = []
         for out in self._last_good_outputs:
             x, y = positions.get(out.name, (out.x, out.y))
-            outputs.append(Output(
-                name=out.name, connected=True, primary=out.primary, edid=out.edid,
-                x=x, y=y, rotation=out.rotation, scale_x=out.scale_x, scale_y=out.scale_y,
-                modes=out.modes,
-            ))
+            if selected is not None and out.name == selected.name and selection["mode"] is not None:
+                width, height = selection["mode"]
+                mode = Mode(width=width, height=height, rate=selection["rate"],
+                            id="", current=True, preferred=False)
+                outputs.append(Output(
+                    name=out.name, connected=True, primary=selection["primary"], edid=out.edid,
+                    x=x, y=y, rotation=out.rotation,
+                    scale_x=selection["scale"], scale_y=selection["scale"], modes=[mode],
+                ))
+            else:
+                outputs.append(Output(
+                    name=out.name, connected=True, primary=out.primary, edid=out.edid,
+                    x=x, y=y, rotation=out.rotation, scale_x=out.scale_x, scale_y=out.scale_y,
+                    modes=out.modes,
+                ))
         return outputs
 
     def _on_apply(self) -> None:
@@ -3156,7 +3210,11 @@ class MainWindow(QMainWindow):
         if not name:
             return
         profile = profile_store.load(name, PROFILES_DIR)
-        outcome = apply.replay_profile(profile)
+        try:
+            outcome = apply.replay_profile(profile)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Apply failed", str(exc))
+            return
         if not outcome.ok:
             QMessageBox.critical(self, "Apply failed", outcome.message)
         self._refresh_from_system()

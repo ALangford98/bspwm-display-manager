@@ -1,0 +1,77 @@
+Screen 0: minimum 320 x 200, current 6400 x 2640, maximum 16384 x 16384
+eDP-1 connected primary 1920x1200+1600+1440 (0x49) normal (normal left inverted right x axis y axis) 301mm x 188mm
+	Identifier: 0x42
+	Timestamp:  33682
+	Subpixel:   unknown
+	Clones:
+	CRTC:       0
+	CRTCs:      0 1 2 3
+	Transform:  1.000000 0.000000 0.000000
+	            0.000000 1.000000 0.000000
+	            0.000000 0.000000 1.000000
+	           filter:
+	EDID:
+		00ffffffffffff0006af9bf900000000
+		591f0104a51e137803d72594585a9329
+		1d505400000001010101010101010101
+		010101010101fa3c80b870b024401010
+		3e002dbc100000180000000f00000000
+		00000000000000000020000000fe0041
+		554f0a202020202020202020000000fe
+		004231343055414b30312e32200a00e2
+	CONNECTOR_ID: 508
+		supported: 508
+  1920x1200 (0x49) 156.100MHz -HSync -VSync *current +preferred
+        h: width  1920 start 1936 end 1952 total 2104 skew    0 clock  74.19KHz
+        v: height 1200 start 1203 end 1217 total 1236           clock  60.03Hz
+DP-1 connected 2560x1440+0+0 (0x4a) normal (normal left inverted right x axis y axis) 597mm x 336mm
+	Identifier: 0x43
+	Timestamp:  33682
+	Subpixel:   unknown
+	Clones:
+	CRTC:       1
+	CRTCs:      0 1 2 3
+	Transform:  1.000000 0.000000 0.000000
+	            0.000000 1.000000 0.000000
+	            0.000000 0.000000 1.000000
+	           filter:
+	EDID:
+		00ffffffffffff0010ac6ca04c453130
+		161e0104b53c22783aac25a5554da326
+		0f505400000001010101010101010101
+		010101010101302a009851002a403070
+		1300520e1100001e000000fd00384c1e
+		530f000a202020202020000000fc0044
+		454c4c20553234313900000000000000
+	CONNECTOR_ID: 526
+		supported: 526
+  2560x1440 (0x4a) 241.500MHz -HSync +VSync *current +preferred
+        h: width  2560 start 2608 end 2640 total 2720 skew    0 clock  88.79KHz
+        v: height 1440 start 1443 end 1447 total 1481           clock  59.95Hz
+DP-2 connected 2560x1440+2560+0 (0x4b) normal (normal left inverted right x axis y axis) 708mm x 399mm
+	Identifier: 0x44
+	Timestamp:  33682
+	Subpixel:   unknown
+	Clones:
+	CRTC:       2
+	CRTCs:      0 1 2 3
+	Transform:  1.000000 0.000000 0.000000
+	            0.000000 1.000000 0.000000
+	            0.000000 0.000000 1.000000
+	           filter:
+	EDID:
+		00ffffffffffff001e6d05d1010101010
+		1e1e0104b53c22783aac25a5554da326
+		0f505400000001010101010101010101
+		010101010101302a009851002a403070
+		1300520e1100001e000000fd00324c1e
+		691a000a202020202020000000fc004c
+		4720554c3834304700000000000000
+	CONNECTOR_ID: 536
+		supported: 536
+  3840x2160 (0x4c) 533.250MHz -HSync +VSync +preferred
+        h: width  3840 start 3888 end 3920 total 4000 skew    0 clock 133.31KHz
+        v: height 2160 start 2163 end 2168 total 2222           clock  59.98Hz
+  2560x1440 (0x4b) 241.500MHz -HSync +VSync *current
+        h: width  2560 start 2608 end 2640 total 2720 skew    0 clock  88.79KHz
+        v: height 1440 start 1443 end 1447 total 1481           clock  59.95Hz
