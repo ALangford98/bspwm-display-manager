@@ -82,9 +82,7 @@ def finish_reconciliation(profile: Profile, resolved: dict[str, str], order: lis
     CLI/GUI layers never need to know that exception type exists."""
     apply_scale_env(profile.scale_percent)
     desktop_assignment = {
-        resolved[pattern]: names
-        for pattern, names in profile.desktop_assignment.items()
-        if pattern in resolved
+        resolved[pattern]: names for pattern, names in profile.desktop_assignment.items()
     }
     try:
         reconcile.reconcile(active_monitors=order, desktop_assignment=desktop_assignment, order=order)

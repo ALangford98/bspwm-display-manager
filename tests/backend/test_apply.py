@@ -76,12 +76,21 @@ def test_finish_reconciliation_returns_failure_outcome_when_reconcile_raises():
     """reconcile.reconcile can raise ReconciliationError (Task 9) --
     finish_reconciliation must catch it and report failure through
     ApplyOutcome rather than letting it propagate as a raw exception
-    into the CLI/GUI layers."""
+    into the CLI/GUI layers. `resolved` must cover every key in
+    _profile()'s desktop_assignment (edid-dell AND eDP-*) -- in the real
+    pipeline resolve_targets() guarantees this for every key that
+    appears in profile.outputs (and desktop_assignment keys are always a
+    subset of those), so finish_reconciliation's dict comprehension is
+    entitled to assume it; passing a partial resolved dict here would
+    raise KeyError before reconcile.reconcile is ever reached, which
+    would test the wrong thing."""
     with patch("bspwm_display_manager.backend.apply.apply_scale_env"), \
          patch("bspwm_display_manager.backend.apply.reconcile.reconcile",
                side_effect=reconcile.ReconciliationError("failed to reorder monitors")), \
          patch("bspwm_display_manager.backend.apply.hooks.run_hooks") as hooks_run:
-        outcome = finish_reconciliation(_profile(), {"eDP-*": "eDP-1"}, ["eDP-1"])
+        outcome = finish_reconciliation(
+            _profile(), {"edid-dell": "DP-1", "eDP-*": "eDP-1"}, ["DP-1", "eDP-1"]
+        )
     assert outcome.ok is False
     assert "failed to reorder monitors" in outcome.message
     hooks_run.assert_not_called()
