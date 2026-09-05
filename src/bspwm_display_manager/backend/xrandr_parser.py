@@ -6,9 +6,10 @@ from bspwm_display_manager.backend.models import LayoutState, Mode, Output
 
 _OUTPUT_LINE = re.compile(
     r"^(?P<name>[A-Za-z0-9_-]+)\s+"
-    r"(?P<status>connected|disconnected)\s*"
+    r"(?P<status>connected|disconnected|unknown connection)\s*"
     r"(?P<primary>primary\s+)?"
-    r"(?:(?P<w>\d+)x(?P<h>\d+)\+(?P<x>\d+)\+(?P<y>\d+)\s+)?"
+    r"(?:(?P<w>\d+)x(?P<h>\d+)(?P<xoff>[+-]\d+)(?P<yoff>[+-]\d+)\s+)?"
+    r"(?:\((?P<modeid>0x[0-9a-fA-F]+)\)\s+(?P<rotation>\S+)\s+\()?"
 )
 _EDID_HEADER = re.compile(r"^\s*EDID:\s*$")
 _EDID_LINE = re.compile(r"^\s{2,}([0-9a-fA-F]+)\s*$")
@@ -36,9 +37,14 @@ def parse_verbose(text: str) -> LayoutState:
         m = _OUTPUT_LINE.match(line)
         if m:
             flush_edid()
+            pending_mode_header = None
             connected = m.group("status") == "connected"
-            x = int(m.group("x")) if m.group("x") else 0
-            y = int(m.group("y")) if m.group("y") else 0
+            # int() accepts a leading '+' or '-', so the signed xoff/yoff
+            # groups (not a hard-coded '+') give correct negative offsets
+            # for monitors positioned below/left of the origin.
+            x = int(m.group("xoff")) if m.group("xoff") else 0
+            y = int(m.group("yoff")) if m.group("yoff") else 0
+            rotation = m.group("rotation") if m.group("rotation") else "normal"
             current = Output(
                 name=m.group("name"),
                 connected=connected,
@@ -46,7 +52,7 @@ def parse_verbose(text: str) -> LayoutState:
                 edid=None,
                 x=x,
                 y=y,
-                rotation="normal",
+                rotation=rotation,
                 scale_x=1.0,
                 scale_y=1.0,
                 modes=[],
@@ -88,8 +94,6 @@ def parse_verbose(text: str) -> LayoutState:
                 current=is_current, preferred=is_preferred,
             )
             current.modes.append(mode)
-            if is_current:
-                current.x = current.x or current.x  # position already parsed from header
             pending_mode_header = None
 
     flush_edid()
