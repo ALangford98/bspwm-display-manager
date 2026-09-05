@@ -1,9 +1,11 @@
-import pytest
+from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from bspwm_display_manager.backend import reconcile
 from bspwm_display_manager.backend.apply import (
-    ApplyOutcome, apply_geometry, finish_reconciliation, replay_profile, resolve_targets,
+    ApplyOutcome, apply_geometry, apply_scale_env, finish_reconciliation, replay_profile, resolve_targets,
 )
 from bspwm_display_manager.backend.models import LayoutState, Mode, Output
 from bspwm_display_manager.backend.profile import OutputSpec, Profile
@@ -141,3 +143,54 @@ def test_replay_profile_returns_finish_reconciliations_outcome():
         outcome = replay_profile(_profile())
     assert outcome.ok is False
     assert "failed to reset padding" in outcome.message
+
+
+def test_apply_geometry_returns_failure_outcome_when_xrandr_apply_raises():
+    """ApplyOutcome is the whole contract Task 18's GUI gates on -- an
+    OSError (e.g. the xrandr binary itself is missing) must not escape
+    as a raw exception any more than a ReconciliationError may."""
+    with patch("bspwm_display_manager.backend.apply.reconcile.retire_monitors"), \
+         patch("bspwm_display_manager.backend.apply.xrandr_client.apply",
+               side_effect=FileNotFoundError("[Errno 2] No such file or directory: 'xrandr'")):
+        outcome = apply_geometry([], overflow_target="eDP-1", survivors=["eDP-1"])
+    assert outcome.ok is False
+    assert "xrandr" in outcome.message
+
+
+def test_finish_reconciliation_returns_failure_outcome_when_apply_scale_env_raises():
+    """Same contract for finish_reconciliation: apply_scale_env writes a
+    real file and shells out to xrdb, both of which can raise OSError
+    (e.g. permission denied, xrdb missing)."""
+    with patch("bspwm_display_manager.backend.apply.apply_scale_env",
+               side_effect=OSError("[Errno 13] Permission denied")), \
+         patch("bspwm_display_manager.backend.apply.reconcile.reconcile") as reconcile_fn, \
+         patch("bspwm_display_manager.backend.apply.hooks.run_hooks") as hooks_run:
+        outcome = finish_reconciliation(
+            _profile(), {"edid-dell": "DP-1", "eDP-*": "eDP-1"}, ["DP-1", "eDP-1"]
+        )
+    assert outcome.ok is False
+    assert "Permission denied" in outcome.message
+    reconcile_fn.assert_not_called()
+    hooks_run.assert_not_called()
+
+
+def test_apply_scale_env_writes_env_file_and_merges_xft_dpi_via_xrdb(tmp_path, monkeypatch):
+    """The only test that actually exercises apply_scale_env's body --
+    every other test in this file patches it out, since it's the one
+    function here with real side effects (a real file write, a real
+    subprocess call to xrdb). Redirects HOME to tmp_path and mocks
+    subprocess.run so this never touches the real machine, however this
+    test is invoked."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with patch("bspwm_display_manager.backend.apply.subprocess.run") as run:
+        apply_scale_env(150)
+
+    run.assert_called_once_with(
+        ["xrdb", "-merge"], input="Xft.dpi: 144\n", text=True, check=False
+    )
+    env_file = tmp_path / ".config" / "bspwm-display-manager" / "env"
+    content = env_file.read_text()
+    assert "export GDK_SCALE=1.5\n" in content
+    assert "export QT_SCALE_FACTOR=1.5\n" in content
+    assert "export QT_AUTO_SCREEN_SCALE_FACTOR=0\n" in content
+    assert "Xft.dpi" not in content  # Xft.dpi goes to xrdb, not the env file

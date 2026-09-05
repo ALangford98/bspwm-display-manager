@@ -61,7 +61,13 @@ def apply_geometry(outputs: list[Output], overflow_target: str, survivors: list[
     except reconcile.ReconciliationError as exc:
         return ApplyOutcome(ok=False, message=str(exc))
     args = command_builder.build_xrandr_args(outputs)
-    result = xrandr_client.apply(args)
+    try:
+        result = xrandr_client.apply(args)
+    except OSError as exc:
+        # e.g. the xrandr binary itself is missing -- ApplyOutcome is the
+        # whole contract Task 18's GUI gates on, so this must not escape
+        # as a raw exception any more than ReconciliationError may.
+        return ApplyOutcome(ok=False, message=str(exc))
     return ApplyOutcome(ok=result.ok, message=result.stderr)
 
 
@@ -80,7 +86,13 @@ def finish_reconciliation(profile: Profile, resolved: dict[str, str], order: lis
     Catches Task 9's reconcile.ReconciliationError from reconcile.reconcile
     and reports it through ApplyOutcome instead of raising, so the
     CLI/GUI layers never need to know that exception type exists."""
-    apply_scale_env(profile.scale_percent)
+    try:
+        apply_scale_env(profile.scale_percent)
+    except OSError as exc:
+        # apply_scale_env writes a real file and shells out to xrdb --
+        # both can raise (permission denied, xrdb missing). Same
+        # never-raise contract as the ReconciliationError handling below.
+        return ApplyOutcome(ok=False, message=str(exc))
     desktop_assignment = {
         resolved[pattern]: names for pattern, names in profile.desktop_assignment.items()
     }
