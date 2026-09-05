@@ -100,10 +100,17 @@ class MainWindow(QMainWindow):
         currently loaded in output_panel — that panel's edited
         mode/rate/primary/scale merged in. output_panel edits only one
         output at a time; _on_output_selected keeps it in sync with
-        output_select_combo."""
+        output_select_combo.
+
+        If the panel's edit makes the selected output primary, every
+        OTHER output is forced non-primary here -- xrandr rejects (or
+        behaves ambiguously on) a command with more than one --primary
+        flag, and _last_good_outputs may still have a stale primary on a
+        different output from before this edit."""
         positions = self.canvas.positions()
         selected = self.output_panel.output
         selection = self.output_panel.current_selection() if selected is not None else None
+        new_primary_forces_others_off = selection is not None and selection["primary"]
 
         outputs = []
         for out in self._last_good_outputs:
@@ -118,8 +125,9 @@ class MainWindow(QMainWindow):
                     scale_x=selection["scale"], scale_y=selection["scale"], modes=[mode],
                 ))
             else:
+                primary = False if new_primary_forces_others_off else out.primary
                 outputs.append(Output(
-                    name=out.name, connected=True, primary=out.primary, edid=out.edid,
+                    name=out.name, connected=True, primary=primary, edid=out.edid,
                     x=x, y=y, rotation=out.rotation, scale_x=out.scale_x, scale_y=out.scale_y,
                     modes=out.modes,
                 ))
@@ -153,7 +161,12 @@ class MainWindow(QMainWindow):
             prev = self._last_good_outputs
             prev_order = [o.name for o in prev]
             prev_primary = next((o.name for o in prev if o.primary), prev_order[0])
-            apply.apply_geometry(prev, overflow_target=prev_primary, survivors=prev_order)
+            revert_outcome = apply.apply_geometry(prev, overflow_target=prev_primary, survivors=prev_order)
+            if not revert_outcome.ok:
+                # The single worst state this dialog exists to prevent:
+                # a failed revert with no explanation. Always tell the
+                # user, since there's no further fallback to try.
+                QMessageBox.critical(self, "Revert failed", revert_outcome.message)
         self._refresh_from_system()
 
     def _on_save(self) -> None:
@@ -176,14 +189,28 @@ class MainWindow(QMainWindow):
             scale_percent=self.scale_control.value(), outputs=specs,
             desktop_assignment=self.desktop_panel.assignment(), hooks=[],
         )
-        profile_store.save(profile, PROFILES_DIR)
-        self._refresh_from_system()
+        try:
+            profile_store.save(profile, PROFILES_DIR)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        # Deliberately NOT a full _refresh_from_system(): that would
+        # re-query live xrandr/bspc state and snap the canvas back to
+        # the current on-screen layout, discarding the arrangement the
+        # user just saved (and about to Apply). Only the profile list
+        # needs to reflect the new save.
+        self.load_combo.clear()
+        self.load_combo.addItems(profile_store.list_profiles(PROFILES_DIR))
 
     def _on_load(self) -> None:
         name = self.load_combo.currentText()
         if not name:
             return
-        profile = profile_store.load(name, PROFILES_DIR)
+        try:
+            profile = profile_store.load(name, PROFILES_DIR)
+        except FileNotFoundError as exc:
+            QMessageBox.critical(self, "Load failed", str(exc))
+            return
         try:
             outcome = apply.replay_profile(profile)
         except ValueError as exc:
