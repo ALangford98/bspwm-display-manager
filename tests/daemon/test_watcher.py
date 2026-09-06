@@ -121,3 +121,61 @@ def test_check_and_apply_treats_startup_none_as_a_change():
         result = check_and_apply(None, Path("/fake/profiles"))
     assert result == "laptop-fp"
     replay.assert_called_once_with(matched)
+
+
+import pytest
+
+from bspwm_display_manager.daemon.watcher import run_forever
+
+
+class _StopLoop(Exception):
+    """Sentinel used only to break run_forever's `while True` in tests."""
+
+
+def test_run_forever_calls_check_and_apply_each_tick_and_sleeps_between():
+    calls = []
+
+    def fake_check(last, profiles_dir):
+        calls.append(last)
+        return f"fp-{len(calls)}"
+
+    sleep_calls = []
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 2:
+            raise _StopLoop()
+
+    with patch("bspwm_display_manager.daemon.watcher.check_and_apply", side_effect=fake_check), \
+         patch("bspwm_display_manager.daemon.watcher.time.sleep", side_effect=fake_sleep):
+        with pytest.raises(_StopLoop):
+            run_forever(Path("/fake/profiles"), interval_seconds=1.5)
+
+    assert calls == [None, "fp-1"]
+    assert sleep_calls == [1.5, 1.5]
+
+
+def test_run_forever_logs_and_continues_when_check_and_apply_raises(capsys):
+    call_count = 0
+
+    def fake_check(last, profiles_dir):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("xrandr not found")
+        return "fp-ok"
+
+    sleep_calls = []
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 2:
+            raise _StopLoop()
+
+    with patch("bspwm_display_manager.daemon.watcher.check_and_apply", side_effect=fake_check), \
+         patch("bspwm_display_manager.daemon.watcher.time.sleep", side_effect=fake_sleep):
+        with pytest.raises(_StopLoop):
+            run_forever(Path("/fake/profiles"))
+
+    assert call_count == 2  # the second tick still ran despite the first raising
+    assert "xrandr not found" in capsys.readouterr().err
