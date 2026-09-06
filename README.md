@@ -12,6 +12,22 @@ why, and what this tool does about it instead).
 
 ## Install
 
+Recommended, via [pipx](https://pipx.pypa.io/) — installs an isolated
+venv and puts `bspwm-display-manager` on your `PATH` (`~/.local/bin`):
+
+    pipx install --editable .
+
+`--editable` means future changes to this checkout take effect
+immediately with no reinstall — worth keeping even if you don't plan to
+modify the code, since it costs nothing and this is still an actively
+developed tool. Drop `--editable` for a normal pinned install instead.
+
+Without pipx, a plain venv works too, but nothing puts the command on
+your shell's `PATH` — you'd invoke it as `.venv/bin/bspwm-display-manager`,
+and any launcher that doesn't inherit your shell's `PATH` (sxhkd, a
+systemd user service, most desktop launchers) needs that full path
+rather than the bare command name:
+
     python -m venv .venv
     .venv/bin/pip install -e .
 
@@ -74,6 +90,22 @@ Check on it with:
 This is entirely optional — `bspwm-display-manager apply <name>` from a
 keyboard shortcut works fine without the daemon running at all.
 
+## Desktop launcher (optional)
+
+To launch the GUI from an application menu/launcher (rofi's `drun` mode,
+a dmenu-based launcher, or a full desktop environment's app grid) instead
+of a terminal or keybinding:
+
+    mkdir -p ~/.local/share/applications
+    cp packaging/bspwm-display-manager.desktop ~/.local/share/applications/
+    update-desktop-database ~/.local/share/applications  # if available; harmless if not
+
+The shipped `.desktop` file's `Exec=` is the bare `bspwm-display-manager`
+command, which relies on it being on `PATH` — true for a pipx install,
+but if you installed into a plain venv instead, edit the `Exec=` line to
+the venv's absolute path (`/path/to/bspwm-display-manager/.venv/bin/bspwm-display-manager gui`)
+first, the same PATH caveat as the systemd unit and sxhkd bindings above.
+
 ## Migrating from hand-written screenlayout scripts
 
 If you have existing `~/.screenlayout/*.sh` + `bsp-assign-desktops` /
@@ -96,14 +128,17 @@ of exactly that setup):
 
    to:
 
-   (sxhkd doesn't inherit your shell's PATH, so point it at the venv's
-   binary directly rather than the bare command name)
+   (sxhkd doesn't inherit your shell's PATH, so point it at the
+   binary's absolute path rather than the bare command name — run
+   `which bspwm-display-manager` to find it; `~/.local/bin/bspwm-display-manager`
+   for a pipx install, `/path/to/bspwm-display-manager/.venv/bin/bspwm-display-manager`
+   for a plain venv one)
 
        super + ctrl + w
-           /path/to/bspwm-display-manager/.venv/bin/bspwm-display-manager apply work
+           /path/to/bspwm-display-manager apply work
 
        super + ctrl + h
-           /path/to/bspwm-display-manager/.venv/bin/bspwm-display-manager apply home
+           /path/to/bspwm-display-manager apply home
 
 4. Reload sxhkd (`pkill -USR1 -x sxhkd`, or however your config reloads it).
 
