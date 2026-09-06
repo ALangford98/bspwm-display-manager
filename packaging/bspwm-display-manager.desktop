@@ -2,7 +2,7 @@
 Type=Application
 Name=bspwm Display Manager
 Comment=Arrange bspwm displays, set scale, and assign desktops to monitors
-Exec=bspwm-display-manager gui
+Exec=/home/anthony/.local/bin/bspwm-display-manager gui
 Icon=preferences-desktop-display
 Terminal=false
 Categories=Settings;HardwareSettings;

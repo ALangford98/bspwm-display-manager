@@ -100,11 +100,17 @@ of a terminal or keybinding:
     cp packaging/bspwm-display-manager.desktop ~/.local/share/applications/
     update-desktop-database ~/.local/share/applications  # if available; harmless if not
 
-The shipped `.desktop` file's `Exec=` is the bare `bspwm-display-manager`
-command, which relies on it being on `PATH` — true for a pipx install,
-but if you installed into a plain venv instead, edit the `Exec=` line to
-the venv's absolute path (`/path/to/bspwm-display-manager/.venv/bin/bspwm-display-manager gui`)
-first, the same PATH caveat as the systemd unit and sxhkd bindings above.
+The shipped `.desktop` file's `Exec=` uses the absolute path
+`~/.local/bin/bspwm-display-manager` (a pipx install's default location) —
+**not** the bare command name, even though pipx does put it on your
+interactive shell's `PATH`. Application launchers (rofi, dmenu-based
+launchers, desktop app grids) are spawned from your X session
+(bspwmrc/sxhkd), which never sources `~/.zshrc`/`~/.bashrc`, so `PATH`
+there lacks `~/.local/bin` and a bare command name fails to resolve —
+the same PATH caveat as the systemd unit and sxhkd bindings above. Run
+`which bspwm-display-manager` to confirm your install's actual path; if
+you installed into a plain venv instead, edit `Exec=` to that venv's
+absolute path (`/path/to/bspwm-display-manager/.venv/bin/bspwm-display-manager gui`).
 
 ## Migrating from hand-written screenlayout scripts
 
