@@ -7,6 +7,7 @@ from bspwm_display_manager.backend import reconcile
 from bspwm_display_manager.backend.apply import (
     ApplyOutcome, apply_geometry, apply_scale_env, finish_reconciliation, replay_profile, resolve_targets,
 )
+from bspwm_display_manager.backend.hooks import HookResult
 from bspwm_display_manager.backend.models import LayoutState, Mode, Output
 from bspwm_display_manager.backend.profile import OutputSpec, Profile
 
@@ -68,10 +69,26 @@ def test_finish_reconciliation_runs_scale_then_reconcile_then_hooks():
          patch("bspwm_display_manager.backend.apply.reconcile.reconcile",
                side_effect=lambda **kw: order_seen.append("reconcile")), \
          patch("bspwm_display_manager.backend.apply.hooks.run_hooks",
-               side_effect=lambda cmds: order_seen.append("hooks")):
+               side_effect=lambda cmds: order_seen.append("hooks") or []):
         outcome = finish_reconciliation(_profile(), {"edid-dell": "DP-1", "eDP-*": "eDP-1"}, ["DP-1", "eDP-1"])
     assert order_seen == ["scale", "reconcile", "hooks"]
     assert outcome.ok is True
+
+
+def test_finish_reconciliation_logs_failed_hooks_to_stderr_but_still_reports_success(capsys):
+    """A broken cosmetic hook (e.g. a polybar reload command with a
+    typo) must not be treated as a failed apply -- only logged, so a
+    user checking journalctl (this matters most for the daemon, where
+    nobody is watching in real time) can see what went wrong."""
+    with patch("bspwm_display_manager.backend.apply.apply_scale_env"), \
+         patch("bspwm_display_manager.backend.apply.reconcile.reconcile"), \
+         patch("bspwm_display_manager.backend.apply.hooks.run_hooks",
+               return_value=[HookResult(command="badcmd", ok=False, stderr="command not found")]):
+        outcome = finish_reconciliation(
+            _profile(), {"edid-dell": "DP-1", "eDP-*": "eDP-1"}, ["DP-1", "eDP-1"]
+        )
+    assert outcome.ok is True
+    assert "badcmd" in capsys.readouterr().err
 
 
 def test_finish_reconciliation_returns_failure_outcome_when_reconcile_raises():

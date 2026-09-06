@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -103,7 +104,13 @@ def finish_reconciliation(profile: Profile, resolved: dict[str, str], order: lis
         reconcile.reconcile(active_monitors=order, desktop_assignment=desktop_assignment, order=order)
     except reconcile.ReconciliationError as exc:
         return ApplyOutcome(ok=False, message=str(exc))
-    hooks.run_hooks(profile.hooks)
+    hook_results = hooks.run_hooks(profile.hooks)
+    for result in hook_results:
+        if not result.ok:
+            print(
+                f"bspwm-display-manager: post-apply hook failed ({result.command!r}): {result.stderr}",
+                file=sys.stderr,
+            )
     return ApplyOutcome(ok=True, message="")
 
 

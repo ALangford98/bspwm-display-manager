@@ -52,6 +52,20 @@ To run it automatically at login via systemd:
     systemctl --user daemon-reload
     systemctl --user enable --now bspwm-display-manager-daemon
 
+The daemon needs `DISPLAY`/`XAUTHORITY` to talk to X, which a systemd
+user service does not inherit automatically. Add this near the end of
+`~/.config/bspwm/bspwmrc` (after X is actually up), alongside its other
+autostart lines:
+
+    systemctl --user import-environment DISPLAY XAUTHORITY
+    systemctl --user restart bspwm-display-manager-daemon.service 2>/dev/null || true
+
+Without this, the daemon will show as `active (running)` in
+`systemctl --user status` but silently do nothing — check
+`journalctl --user -u bspwm-display-manager-daemon` for a repeating
+"no connected outputs reported" line, which means it's running without
+a display to talk to.
+
 Check on it with:
 
     systemctl --user status bspwm-display-manager-daemon
