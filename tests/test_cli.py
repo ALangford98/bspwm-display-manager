@@ -41,3 +41,11 @@ def test_apply_prints_error_when_profile_outputs_do_not_match_connected_monitors
         code = main(["apply", "work"])
     assert code == 1
     assert "no connected output matches" in capsys.readouterr().err
+
+
+def test_daemon_runs_run_forever_against_the_profiles_dir():
+    with patch("bspwm_display_manager.daemon.watcher.run_forever") as run_forever:
+        main(["daemon"])
+    run_forever.assert_called_once_with(
+        Path.home() / ".config" / "bspwm-display-manager" / "profiles"
+    )

@@ -17,6 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("name")
 
     sub.add_parser("gui", help="launch the GUI")
+    sub.add_parser("daemon", help="run the hotplug auto-apply daemon (foreground)")
 
     args = parser.parse_args(argv)
 
@@ -39,5 +40,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "gui":
         from bspwm_display_manager.ui.app import run
         return run()
+
+    if args.command == "daemon":
+        from bspwm_display_manager.daemon import watcher as daemon_watcher
+        daemon_watcher.run_forever(PROFILES_DIR)
+        return 0
 
     return 1
