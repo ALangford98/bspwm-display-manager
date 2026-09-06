@@ -34,6 +34,32 @@ your session yourself -- add this to your `~/.xprofile` or the top of
 
     [ -f ~/.config/bspwm-display-manager/env ] && source ~/.config/bspwm-display-manager/env
 
+## Hotplug auto-apply (optional)
+
+`bspwm-display-manager daemon` runs in the foreground, polling the
+connected monitors every few seconds. When the set of connected
+displays changes (a dock connect/disconnect, a monitor power cycle) it
+automatically replays whichever saved profile's fingerprint matches —
+no keyboard shortcut needed. If nothing matches, it leaves your current
+layout alone and sends a desktop notification rather than guessing.
+
+To run it automatically at login via systemd:
+
+    mkdir -p ~/.config/systemd/user
+    cp packaging/bspwm-display-manager-daemon.service ~/.config/systemd/user/
+    # edit the ExecStart line in that file to point at this project's
+    # actual .venv/bin/bspwm-display-manager path
+    systemctl --user daemon-reload
+    systemctl --user enable --now bspwm-display-manager-daemon
+
+Check on it with:
+
+    systemctl --user status bspwm-display-manager-daemon
+    journalctl --user -u bspwm-display-manager-daemon -f
+
+This is entirely optional — `bspwm-display-manager apply <name>` from a
+keyboard shortcut works fine without the daemon running at all.
+
 ## Migrating from hand-written screenlayout scripts
 
 If you have existing `~/.screenlayout/*.sh` + `bsp-assign-desktops` /

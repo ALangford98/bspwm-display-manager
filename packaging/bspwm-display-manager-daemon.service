@@ -1,0 +1,15 @@
+[Unit]
+Description=bspwm-display-manager hotplug auto-apply daemon
+After=graphical-session.target
+
+[Service]
+# Replace this with the absolute path to this project's venv --
+# systemd user services do not inherit your interactive shell's PATH,
+# so the bare command name will not resolve (same reason the sxhkd
+# migration example in this README uses an absolute path).
+ExecStart=/path/to/bspwm-display-manager/.venv/bin/bspwm-display-manager daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
