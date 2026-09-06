@@ -51,7 +51,8 @@ def test_retire_monitors_leaves_surviving_monitors_alone():
 
 
 def test_assign_desktops_moves_an_existing_desktop_by_identity():
-    with patch("bspwm_display_manager.backend.reconcile.bspc_client.desktop_exists", return_value=True), \
+    with patch("bspwm_display_manager.backend.reconcile.bspc_client.query_desktop_names", return_value=[]), \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.desktop_exists", return_value=True), \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.move_desktop_to_monitor") as move, \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.add_desktop") as add:
         rc.assign_desktops("DP-1", ["pm", "office"])
@@ -60,12 +61,30 @@ def test_assign_desktops_moves_an_existing_desktop_by_identity():
 
 
 def test_assign_desktops_adds_a_desktop_that_does_not_exist_yet():
-    with patch("bspwm_display_manager.backend.reconcile.bspc_client.desktop_exists", return_value=False), \
+    with patch("bspwm_display_manager.backend.reconcile.bspc_client.query_desktop_names", return_value=[]), \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.desktop_exists", return_value=False), \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.add_desktop") as add, \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.move_desktop_to_monitor") as move:
         rc.assign_desktops("DP-1", ["ide1"])
     add.assert_called_once_with("DP-1", "ide1")
     move.assert_not_called()
+
+
+def test_assign_desktops_skips_a_desktop_already_on_the_target():
+    """bspc silently refuses to move a monitor's LAST desktop (nonzero
+    exit). Treating that refusal as fatal would abort reconciliation on
+    an idempotent re-apply of an already-correct profile. Skip the move
+    entirely when the desktop is already there, rather than relying on
+    bspc tolerating a no-op call."""
+    with patch("bspwm_display_manager.backend.reconcile.bspc_client.query_desktop_names",
+               return_value=["term"]), \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.desktop_exists") as exists, \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.move_desktop_to_monitor") as move, \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.add_desktop") as add:
+        rc.assign_desktops("eDP-1", ["term"])
+    exists.assert_not_called()
+    move.assert_not_called()
+    add.assert_not_called()
 
 
 def test_assign_desktops_never_calls_bspc_monitor_dash_d():
@@ -160,7 +179,8 @@ def test_retire_monitors_raises_when_add_desktop_fails():
 
 
 def test_assign_desktops_raises_when_move_fails():
-    with patch("bspwm_display_manager.backend.reconcile.bspc_client.desktop_exists", return_value=True), \
+    with patch("bspwm_display_manager.backend.reconcile.bspc_client.query_desktop_names", return_value=[]), \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.desktop_exists", return_value=True), \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.move_desktop_to_monitor",
                return_value=False):
         with pytest.raises(rc.ReconciliationError):

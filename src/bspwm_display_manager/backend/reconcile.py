@@ -38,8 +38,18 @@ def assign_desktops(target: str, names: list[str]) -> None:
     """Move each named desktop to `target` by identity if it exists
     anywhere, else create it fresh. Never uses `bspc monitor -d`, which
     silently folds a shrinking desktop list's dropped names into the
-    last name in the new list instead of releasing them elsewhere."""
+    last name in the new list instead of releasing them elsewhere.
+
+    Skips the move entirely for a desktop already on `target`: bspc
+    silently refuses to move a monitor's LAST desktop (a documented
+    behavior, see this module's docstring and the design spec's Prior
+    Art section) -- re-applying an already-correct profile where that
+    desktop is the target monitor's only one would otherwise abort
+    reconciliation on a call that should have been a no-op."""
+    already_there = set(bspc_client.query_desktop_names(monitor=target))
     for name in names:
+        if name in already_there:
+            continue
         if bspc_client.desktop_exists(name):
             if not bspc_client.move_desktop_to_monitor(name, target):
                 raise ReconciliationError(f"failed to move desktop {name!r} to {target!r}")

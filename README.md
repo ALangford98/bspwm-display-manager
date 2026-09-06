@@ -22,6 +22,18 @@ why, and what this tool does about it instead).
 
 Profiles live in `~/.config/bspwm-display-manager/profiles/*.json`.
 
+## Session-wide scale
+
+The GUI's session scale control (and each profile's saved scale) writes
+`Xft.dpi` via `xrdb -merge` immediately -- that part takes effect right
+away for newly-drawn X clients. GTK/Qt apps also need `GDK_SCALE`,
+`QT_SCALE_FACTOR`, and `QT_AUTO_SCREEN_SCALE_FACTOR`, which are written
+to `~/.config/bspwm-display-manager/env` but need to be sourced into
+your session yourself -- add this to your `~/.xprofile` or the top of
+`~/.config/bspwm/bspwmrc`:
+
+    [ -f ~/.config/bspwm-display-manager/env ] && source ~/.config/bspwm-display-manager/env
+
 ## Migrating from hand-written screenlayout scripts
 
 If you have existing `~/.screenlayout/*.sh` + `bsp-assign-desktops` /
@@ -44,11 +56,14 @@ of exactly that setup):
 
    to:
 
+   (sxhkd doesn't inherit your shell's PATH, so point it at the venv's
+   binary directly rather than the bare command name)
+
        super + ctrl + w
-           bspwm-display-manager apply work
+           /path/to/bspwm-display-manager/.venv/bin/bspwm-display-manager apply work
 
        super + ctrl + h
-           bspwm-display-manager apply home
+           /path/to/bspwm-display-manager/.venv/bin/bspwm-display-manager apply home
 
 4. Reload sxhkd (`pkill -USR1 -x sxhkd`, or however your config reloads it).
 

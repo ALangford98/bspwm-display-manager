@@ -39,3 +39,27 @@ def test_collect_outputs_for_apply_forces_other_outputs_non_primary_when_selecte
     outputs = window._collect_outputs_for_apply()
     primaries = [o.name for o in outputs if o.primary]
     assert primaries == ["DP-1"]
+
+
+def test_on_save_keys_desktop_assignment_by_the_same_pattern_as_outputs(qapp, tmp_path):
+    """Regression test for the KeyError this exact mismatch caused:
+    _on_save must key desktop_assignment by the same edid_or_pattern
+    value used in each OutputSpec, not by the raw monitor name
+    desktop_panel happens to use internally."""
+    from bspwm_display_manager.ui.main_window import MainWindow
+    from bspwm_display_manager.backend import profile_store
+
+    fixture = (Path(__file__).parent.parent / "fixtures" / "xrandr_verbose_dual_office.txt").read_text()
+    with patch("bspwm_display_manager.ui.main_window.xrandr_client.query_verbose", return_value=fixture), \
+         patch("bspwm_display_manager.ui.main_window.bspc_client.query_desktop_names", return_value=["term"]), \
+         patch("bspwm_display_manager.ui.main_window.profile_store.list_profiles", return_value=[]):
+        window = MainWindow()
+
+    with patch("bspwm_display_manager.ui.main_window.PROFILES_DIR", tmp_path), \
+         patch("bspwm_display_manager.ui.main_window.QInputDialog.getText", return_value=("work", True)):
+        window._on_save()
+
+    saved = profile_store.load("work", tmp_path)
+    output_patterns = {spec.edid_or_pattern for spec in saved.outputs}
+    assert set(saved.desktop_assignment.keys()) <= output_patterns
+    assert saved.desktop_assignment  # not empty -- the bug would have made this {} too

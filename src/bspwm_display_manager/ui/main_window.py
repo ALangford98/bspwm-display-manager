@@ -175,19 +175,32 @@ class MainWindow(QMainWindow):
             return
         outputs = self._collect_outputs_for_apply()
         specs = []
+        name_to_pattern = {}
         for out in outputs:
             mode = out.current_mode()
             if mode is None:
                 continue
+            pattern = out.edid or out.name
+            name_to_pattern[out.name] = pattern
             specs.append(OutputSpec(
-                edid_or_pattern=out.edid or out.name, mode=(mode.width, mode.height),
+                edid_or_pattern=pattern, mode=(mode.width, mode.height),
                 rate=mode.rate, x=out.x, y=out.y, rotation=out.rotation,
                 scale_x=out.scale_x, scale_y=out.scale_y, primary=out.primary,
             ))
+        desktop_assignment = {
+            name_to_pattern[mon]: names
+            for mon, names in self.desktop_panel.assignment().items()
+            if mon in name_to_pattern
+        }
+        try:
+            existing = profile_store.load(name, PROFILES_DIR)
+            hooks_list = existing.hooks
+        except FileNotFoundError:
+            hooks_list = []
         profile = Profile(
             name=name, fingerprint=edid.fingerprint(outputs),
             scale_percent=self.scale_control.value(), outputs=specs,
-            desktop_assignment=self.desktop_panel.assignment(), hooks=[],
+            desktop_assignment=desktop_assignment, hooks=hooks_list,
         )
         try:
             profile_store.save(profile, PROFILES_DIR)

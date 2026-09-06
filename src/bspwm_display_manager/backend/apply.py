@@ -93,9 +93,12 @@ def finish_reconciliation(profile: Profile, resolved: dict[str, str], order: lis
         # both can raise (permission denied, xrdb missing). Same
         # never-raise contract as the ReconciliationError handling below.
         return ApplyOutcome(ok=False, message=str(exc))
-    desktop_assignment = {
-        resolved[pattern]: names for pattern, names in profile.desktop_assignment.items()
-    }
+    try:
+        desktop_assignment = {
+            resolved[pattern]: names for pattern, names in profile.desktop_assignment.items()
+        }
+    except KeyError as exc:
+        return ApplyOutcome(ok=False, message=f"desktop_assignment references unknown output {exc}")
     try:
         reconcile.reconcile(active_monitors=order, desktop_assignment=desktop_assignment, order=order)
     except reconcile.ReconciliationError as exc:
@@ -113,9 +116,21 @@ def replay_profile(profile: Profile) -> ApplyOutcome:
     resolved = resolve_targets(profile, state)
     order = [resolved[spec.edid_or_pattern] for spec in profile.outputs]
     overflow_target = next(
-        resolved[spec.edid_or_pattern] for spec in profile.outputs if spec.primary
+        (resolved[spec.edid_or_pattern] for spec in profile.outputs if spec.primary), None
     )
+    if overflow_target is None:
+        return ApplyOutcome(ok=False, message="profile has no primary output")
     outputs = _outputs_for_apply(profile, resolved)
+    # Any connected output NOT named by this profile must be explicitly
+    # turned off -- otherwise it stays live in X even though its bspwm
+    # monitor was just retired by apply_geometry below.
+    named = set(resolved.values())
+    for out in state.connected():
+        if out.name not in named:
+            outputs.append(Output(
+                name=out.name, connected=True, primary=False, edid=None,
+                x=0, y=0, rotation="normal", scale_x=1.0, scale_y=1.0, modes=[],
+            ))
     outcome = apply_geometry(outputs, overflow_target=overflow_target, survivors=order)
     if not outcome.ok:
         return outcome

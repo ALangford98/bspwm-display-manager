@@ -174,6 +174,60 @@ def test_finish_reconciliation_returns_failure_outcome_when_apply_scale_env_rais
     hooks_run.assert_not_called()
 
 
+def test_finish_reconciliation_returns_failure_outcome_when_resolved_is_missing_a_desktop_assignment_key():
+    """A hand-edited or stale profile could have a desktop_assignment
+    key that resolve_targets never produced. Must not raise a raw
+    KeyError -- report it through ApplyOutcome like every other failure
+    in this function."""
+    with patch("bspwm_display_manager.backend.apply.apply_scale_env"):
+        outcome = finish_reconciliation(_profile(), {"eDP-*": "eDP-1"}, ["eDP-1"])
+    assert outcome.ok is False
+    assert "edid-dell" in outcome.message
+
+
+def test_replay_profile_turns_off_connected_outputs_not_in_the_profile():
+    """A profile that only lists eDP-1 (home) must explicitly turn off
+    any other connected output (e.g. DP-1, still physically connected
+    while docked) -- otherwise it stays live in X even though its bspwm
+    monitor was just retired."""
+    state = LayoutState(outputs=[
+        Output(name="eDP-1", connected=True, primary=True, edid="edid-laptop",
+               x=0, y=0, rotation="normal", scale_x=1.0, scale_y=1.0, modes=[]),
+        Output(name="DP-1", connected=True, primary=False, edid="edid-dell",
+               x=0, y=0, rotation="normal", scale_x=1.0, scale_y=1.0, modes=[]),
+    ])
+    home_profile = Profile(
+        name="home", fingerprint="fp", scale_percent=100,
+        outputs=[OutputSpec(edid_or_pattern="edid-laptop", mode=(1920, 1200), rate=60.03,
+                             x=0, y=0, rotation="normal", scale_x=1.0, scale_y=1.0, primary=True)],
+        desktop_assignment={"edid-laptop": ["term"]}, hooks=[],
+    )
+    captured = {}
+    with patch("bspwm_display_manager.backend.apply.xrandr_client.query_verbose", return_value=""), \
+         patch("bspwm_display_manager.backend.apply.xrandr_parser.parse_verbose", return_value=state), \
+         patch("bspwm_display_manager.backend.apply.reconcile.retire_monitors"), \
+         patch("bspwm_display_manager.backend.apply.command_builder.build_xrandr_args",
+               side_effect=lambda outs: captured.setdefault("outputs", outs) or []), \
+         patch("bspwm_display_manager.backend.apply.xrandr_client.apply",
+               return_value=type("R", (), {"ok": True, "stderr": ""})()), \
+         patch("bspwm_display_manager.backend.apply.finish_reconciliation",
+               return_value=ApplyOutcome(ok=True, message="")):
+        replay_profile(home_profile)
+    off_names = [o.name for o in captured["outputs"] if not o.modes]
+    assert off_names == ["DP-1"]
+
+
+def test_replay_profile_returns_failure_outcome_when_no_output_is_primary():
+    profile = _profile()
+    for spec in profile.outputs:
+        spec.primary = False
+    with patch("bspwm_display_manager.backend.apply.xrandr_client.query_verbose", return_value=""), \
+         patch("bspwm_display_manager.backend.apply.xrandr_parser.parse_verbose", return_value=_state()):
+        outcome = replay_profile(profile)
+    assert outcome.ok is False
+    assert "primary" in outcome.message
+
+
 def test_apply_scale_env_writes_env_file_and_merges_xft_dpi_via_xrdb(tmp_path, monkeypatch):
     """The only test that actually exercises apply_scale_env's body --
     every other test in this file patches it out, since it's the one
