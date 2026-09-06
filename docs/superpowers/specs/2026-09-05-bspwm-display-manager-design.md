@@ -194,6 +194,67 @@ Three layers, split so the useful logic isn't trapped inside Qt:
    Reconciliation. If no profile matches, it leaves the current layout
    untouched and sends a `notify-send` notification (dunst is already
    configured) rather than guessing.
+
+   **Implementation (this project's second plan, built on top of the
+   completed core plan):**
+
+   - **Detection: polling, not event-driven.** `run_forever(profiles_dir,
+     interval_seconds=3.0)` loops `check_and_apply(...)` on a fixed
+     interval. Matches this project's existing subprocess-only
+     philosophy (no python-xlib/libXrandr bindings, no udev
+     dependency) — a few seconds of latency after a physical
+     connect/disconnect is an acceptable trade for the simplicity. An
+     event-driven `udevadm monitor` alternative is a possible future
+     replacement for this one function, not a v1 requirement.
+   - **Split for testability**, mirroring `backend/apply.py`'s
+     pattern of a pure-ish core plus a thin unmockable loop:
+     - `find_matching_profile(fingerprint: str, profiles_dir: Path) -> Profile | None`
+       — scans `profile_store.list_profiles()`, loads each, returns the
+       first whose stored `Profile.fingerprint` equals the given
+       fingerprint (already computed and stored at save time by the
+       GUI — no new fingerprinting logic needed here beyond calling
+       `backend.edid.fingerprint()` on the currently connected
+       outputs).
+     - `check_and_apply(last_fingerprint: str | None, profiles_dir: Path) -> str`
+       — queries current state (`xrandr_client` + `xrandr_parser`),
+       computes its fingerprint. If unchanged from `last_fingerprint`,
+       does nothing (including the common case: nothing physically
+       changed since the last poll). If changed — including the first
+       call at daemon startup, where `last_fingerprint` is `None` —
+       looks up a matching profile: found → `apply.replay_profile()`,
+       notify success/failure; not found → notify "no profile for this
+       monitor combination", layout untouched. Always returns the new
+       fingerprint, so the caller remembers it for the next tick
+       regardless of what happened.
+     - `run_forever` is the only piece that isn't unit-testable
+       (an infinite loop with a real `time.sleep`) — verified manually,
+       same as the spec's existing stated testing approach for this
+       component.
+   - **Failure handling within the loop:** a transient `xrandr`/`bspc`
+     failure during one poll is logged (stdout/stderr, which a systemd
+     user service routes to `journalctl --user`) and the loop
+     continues — a crash-looping systemd service is worse than one
+     that logs and retries next tick. A failed `apply.replay_profile`
+     is notified once; the new fingerprint is still remembered so the
+     daemon doesn't retry the same failing apply every poll interval —
+     it waits for the next real state change.
+   - **`daemon/notify.py`** wraps `notify-send` as best-effort: if it's
+     not installed, log and continue rather than crash the daemon over
+     missing UI sugar.
+   - **CLI:** `bspwm-display-manager daemon` is added as a third
+     subcommand alongside the existing `apply`/`gui`, same lazy-import
+     pattern as `gui` (no PySide6 import needed for the daemon path).
+   - **Lifecycle:** ships as `packaging/bspwm-display-manager-daemon.service`,
+     a systemd `--user` unit template (`Restart=on-failure`,
+     `WantedBy=default.target`) with a placeholder `ExecStart` path —
+     the README documents filling in the venv's absolute
+     `bin/bspwm-display-manager` path, the same PATH lesson the core
+     plan's final review caught in the sxhkd migration example (a
+     systemd user service does not inherit an interactive shell's
+     PATH any more than sxhkd does). Not auto-installed by `pip
+     install` — the user copies/symlinks it into
+     `~/.config/systemd/user/` themselves, consistent with this
+     project never auto-modifying the user's existing configuration.
 10. **CLI** — `bspwm-display-manager apply <profile-name>` runs the same
     Command Builder + Desktop Reconciliation pipeline as the GUI's Apply
     button, non-interactively (no confirm/revert countdown — a keyboard
