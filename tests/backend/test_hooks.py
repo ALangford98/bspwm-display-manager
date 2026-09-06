@@ -1,3 +1,4 @@
+import subprocess
 from unittest.mock import MagicMock, patch
 
 from bspwm_display_manager.backend.hooks import run_hooks
@@ -26,3 +27,17 @@ def test_empty_hook_list_runs_nothing():
         results = run_hooks([])
     run.assert_not_called()
     assert results == []
+
+
+def test_a_hook_that_never_closes_its_pipes_times_out_instead_of_hanging_forever():
+    # A hook that backgrounds a long-lived process without redirecting its
+    # fds (e.g. `setsid -f some-daemon` with no `>/dev/null 2>&1 </dev/null`)
+    # leaves capture_output's pipe write end open in the grandchild for as
+    # long as that process runs -- subprocess.run would otherwise block
+    # forever waiting for EOF that never comes, freezing apply/the daemon.
+    ok = MagicMock(returncode=0, stderr="")
+    with patch("subprocess.run", side_effect=[subprocess.TimeoutExpired(cmd="stuck", timeout=10), ok]):
+        results = run_hooks(["stuck", "echo hi"])
+    assert results[0].ok is False
+    assert "timed out" in results[0].stderr
+    assert results[1].ok is True
