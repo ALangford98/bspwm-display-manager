@@ -668,13 +668,34 @@ confirm zero failures).
 
 - [ ] **Step 6: Verify the console script's daemon subcommand resolves**
 
-Run: `.venv/bin/pip install -e . && timeout 4 .venv/bin/bspwm-display-manager daemon; echo "exit: $?"`
-Expected: runs for ~4 seconds (one or more real poll ticks against
-whatever's actually connected on this machine), then `timeout` kills it
-(exit code 124) — confirms the command starts, doesn't crash
-immediately, and doesn't import PySide6 (no Qt-related error even
-though this environment has PySide6 installed from the core plan — the
-point is it *wouldn't* need to be installed).
+Run with `HOME` overridden to an empty temp directory — **do not** run
+this against the real `~/.config/bspwm-display-manager/profiles/`.
+`PROFILES_DIR` resolves from `Path.home()` at import time with no CLI
+override, so a real profile that happens to match this machine's
+currently-connected monitors would trigger a genuine `apply.replay_profile`
+(real `xrandr`/`bspc` calls) during what should be a harmless
+does-it-start check:
+
+```bash
+.venv/bin/pip install -e .
+FAKE_HOME="$(mktemp -d)"
+HOME="$FAKE_HOME" timeout 4 .venv/bin/bspwm-display-manager daemon
+echo "exit: $?"
+rm -rf "$FAKE_HOME"
+```
+
+Expected: with `HOME` pointed at an empty temp dir, `PROFILES_DIR`
+resolves to `$FAKE_HOME/.config/bspwm-display-manager/profiles`, which
+doesn't exist — `list_profiles` returns `[]`, so `find_matching_profile`
+always returns `None` and `apply.replay_profile` is never called for
+real. The daemon runs for ~4 seconds (one or more real poll ticks
+against whatever's actually connected, but always landing on the
+"no profile matches" notification path), then `timeout` kills it (exit
+code 124) — confirms the command starts, doesn't crash, and doesn't
+import PySide6 (no Qt-related error even though this environment has
+PySide6 installed from the core plan — the point is it *wouldn't* need
+to be installed), without any risk of mutating the real display/desktop
+state.
 
 - [ ] **Step 7: Commit**
 
