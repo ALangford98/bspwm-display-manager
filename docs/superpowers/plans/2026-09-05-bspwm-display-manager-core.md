@@ -352,6 +352,52 @@ def test_edid_differs_per_output():
     state = parse_verbose(text)
     by_name = {o.name: o.edid for o in state.connected()}
     assert len({by_name["eDP-1"], by_name["DP-1"], by_name["DP-2"]}) == 3
+
+
+def test_negative_offset_is_parsed_not_dropped_to_zero():
+    """A monitor positioned below/left of the origin uses a '-' instead of
+    the second '+' in its geometry (e.g. 1920x1080+0-1080). Regression
+    test: an earlier version of this regex hard-coded '+' for both
+    signs, silently defaulting negative offsets to 0."""
+    text = (
+        "HDMI-1 connected 1920x1080+0-1080 (0x4a) normal "
+        "(normal left inverted right x axis y axis) 520mm x 320mm\n"
+        "  1920x1080 (0x4a) 100.00MHz -HSync +VSync *current +preferred\n"
+        "        v: height 1080 start 1081 end 1084 total 1118           clock  60.00Hz\n"
+    )
+    state = parse_verbose(text)
+    assert (state.outputs[0].x, state.outputs[0].y) == (0, -1080)
+
+
+def test_unrecognized_connection_status_does_not_corrupt_the_prior_output():
+    """xrandr can report a line like 'DP-5 unknown connection (...)' for
+    some outputs. Regression test: an earlier version silently kept
+    `current` pointed at the previous output when a header line's status
+    didn't match connected|disconnected exactly, so DP-5's property lines
+    got misattributed to eDP-1 instead of being cleanly skipped."""
+    text = (
+        "eDP-1 connected primary 1920x1200+0+0 (0x49) normal "
+        "(normal left inverted right x axis y axis) 301mm x 188mm\n"
+        "  1920x1200 (0x49) 100.00MHz -HSync -VSync *current +preferred\n"
+        "        v: height 1200 start 1203 end 1217 total 1236           clock  60.00Hz\n"
+        "DP-5 unknown connection (normal left inverted right x axis y axis)\n"
+        "\tCONNECTOR_ID: 999\n"
+    )
+    state = parse_verbose(text)
+    assert [o.name for o in state.outputs] == ["eDP-1", "DP-5"]
+    edp1 = state.outputs[0]
+    assert len(edp1.modes) == 1
+    dp5 = state.outputs[1]
+    assert dp5.connected is False
+
+
+def test_rotation_is_captured_from_the_header_line():
+    text = (
+        "DP-2 connected 1080x1920+0+0 (0x4b) left "
+        "(normal left inverted right x axis y axis) 300mm x 500mm\n"
+    )
+    state = parse_verbose(text)
+    assert state.outputs[0].rotation == "left"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -371,9 +417,10 @@ from bspwm_display_manager.backend.models import LayoutState, Mode, Output
 
 _OUTPUT_LINE = re.compile(
     r"^(?P<name>[A-Za-z0-9_-]+)\s+"
-    r"(?P<status>connected|disconnected)\s*"
+    r"(?P<status>connected|disconnected|unknown connection)\s*"
     r"(?P<primary>primary\s+)?"
-    r"(?:(?P<w>\d+)x(?P<h>\d+)\+(?P<x>\d+)\+(?P<y>\d+)\s+)?"
+    r"(?:(?P<w>\d+)x(?P<h>\d+)(?P<xoff>[+-]\d+)(?P<yoff>[+-]\d+)\s+)?"
+    r"(?:\((?P<modeid>0x[0-9a-fA-F]+)\)\s+(?P<rotation>\S+)\s+\()?"
 )
 _EDID_HEADER = re.compile(r"^\s*EDID:\s*$")
 _EDID_LINE = re.compile(r"^\s{2,}([0-9a-fA-F]+)\s*$")
@@ -401,9 +448,14 @@ def parse_verbose(text: str) -> LayoutState:
         m = _OUTPUT_LINE.match(line)
         if m:
             flush_edid()
+            pending_mode_header = None
             connected = m.group("status") == "connected"
-            x = int(m.group("x")) if m.group("x") else 0
-            y = int(m.group("y")) if m.group("y") else 0
+            # int() accepts a leading '+' or '-', so the signed xoff/yoff
+            # groups (not a hard-coded '+') give correct negative offsets
+            # for monitors positioned below/left of the origin.
+            x = int(m.group("xoff")) if m.group("xoff") else 0
+            y = int(m.group("yoff")) if m.group("yoff") else 0
+            rotation = m.group("rotation") if m.group("rotation") else "normal"
             current = Output(
                 name=m.group("name"),
                 connected=connected,
@@ -411,7 +463,7 @@ def parse_verbose(text: str) -> LayoutState:
                 edid=None,
                 x=x,
                 y=y,
-                rotation="normal",
+                rotation=rotation,
                 scale_x=1.0,
                 scale_y=1.0,
                 modes=[],
@@ -453,18 +505,24 @@ def parse_verbose(text: str) -> LayoutState:
                 current=is_current, preferred=is_preferred,
             )
             current.modes.append(mode)
-            if is_current:
-                current.x = current.x or current.x  # position already parsed from header
             pending_mode_header = None
 
     flush_edid()
     return LayoutState(outputs=outputs)
 ```
 
+Every output-header-shaped line — including one whose status is neither
+`connected` nor `disconnected` (xrandr's `unknown connection`) — matches
+`_OUTPUT_LINE` and reassigns `current`, `pending_mode_header` resets at
+every such boundary too. This is deliberate: it's what stops an
+unrecognized or unusual header line from leaving `current` pointed at
+the *previous* output, which would otherwise misattribute that output's
+property/mode/EDID lines to the wrong monitor.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/backend/test_xrandr_parser.py -v`
-Expected: 5 passed
+Expected: 8 passed
 
 - [ ] **Step 5: Commit**
 
@@ -658,6 +716,15 @@ def test_build_scale_env_150_percent():
     assert env["GDK_SCALE"] == "1.5"
     assert env["QT_SCALE_FACTOR"] == "1.5"
     assert env["Xft.dpi"] == "144"
+
+
+def test_build_scale_env_rounds_rather_than_truncates_non_quarter_percentages():
+    """110% -> 96*1.1 = 105.6. int() truncates to 105 (silently 1 dpi
+    low); the correct, non-biased value is round() -> 106. Only
+    percentages that are multiples of 25 land on an exact integer, so
+    this regression would not be caught by the 100%/150% tests above."""
+    env = build_scale_env(110)
+    assert env["Xft.dpi"] == "106"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -703,7 +770,7 @@ def build_scale_env(percent: int) -> dict[str, str]:
         "GDK_SCALE": _trim(factor),
         "QT_SCALE_FACTOR": _trim(factor),
         "QT_AUTO_SCREEN_SCALE_FACTOR": "0",
-        "Xft.dpi": str(int(_BASE_DPI * factor)),
+        "Xft.dpi": str(round(_BASE_DPI * factor)),
     }
 
 
@@ -718,7 +785,7 @@ not apply to an off output — the implementation's early `continue` for
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/backend/test_command_builder.py -v`
-Expected: 5 passed
+Expected: 6 passed
 
 - [ ] **Step 5: Commit**
 
@@ -816,6 +883,25 @@ def test_suggests_100_percent_for_a_single_output():
 def test_falls_back_to_100_for_a_non_clean_ratio():
     outs = [_o("DP-1", 1920, 1080), _o("DP-2", 2560, 1440)]
     assert suggest_global_scale(outs) == 100
+
+
+def test_three_outputs_where_every_height_fits_one_of_two_clean_tiers():
+    """Two matching 1440p monitors plus one 4K: every height is either
+    at the 1x tier (1440) or the 1.5x tier (2160), so a single global
+    scale keeps every screen consistently sized."""
+    outs = [_o("DP-1", 2560, 1440), _o("DP-2", 2560, 1440), _o("DP-3", 3840, 2160)]
+    assert suggest_global_scale(outs) == 150
+
+
+def test_three_outputs_with_a_height_that_fits_neither_tier_falls_back_to_100():
+    """Regression test: an earlier version of this function only ever
+    checked the tallest/shortest pair, so three outputs at heights
+    1000/1300/1500 wrongly returned 150 (matching the 1000:1500 = 1.5
+    extremes) while silently ignoring that 1300 fits neither the 1x nor
+    the 1.5x tier -- that output would not actually be consistently
+    sized under the suggested scale."""
+    outs = [_o("DP-1", 1000, 1000), _o("DP-2", 1300, 1300), _o("DP-3", 1500, 1500)]
+    assert suggest_global_scale(outs) == 100
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -867,7 +953,19 @@ def suggest_global_scale(outputs: list[Output]) -> int:
         return 100
     ratio = tallest / shortest
     for clean_ratio, percent in _CLEAN_RATIOS.items():
-        if abs(ratio - clean_ratio) <= _TOLERANCE:
+        if abs(ratio - clean_ratio) > _TOLERANCE:
+            continue
+        # The tallest/shortest pair alone isn't enough with 3+ outputs:
+        # a middle-sized monitor could fit neither the "1x" tier (the
+        # shortest) nor the "clean_ratio x" tier (the tallest), meaning
+        # it would NOT be consistently sized under this suggested scale
+        # even though the pair looks clean. Every connected output must
+        # land near one of the two tiers before this ratio counts.
+        tiers = (1.0, clean_ratio)
+        if all(
+            any(abs(h / shortest - tier) <= _TOLERANCE for tier in tiers)
+            for h in heights
+        ):
             return percent
     return 100
 ```
@@ -875,7 +973,7 @@ def suggest_global_scale(outputs: list[Output]) -> int:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/backend/test_edid.py tests/backend/test_scale.py -v`
-Expected: 8 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1343,8 +1441,16 @@ before implementing.
 
 **Interfaces:**
 - Consumes: every function in `bspc_client` from Task 8, plus the new
-  `desktop_is_empty`.
+  `desktop_is_empty`, plus Task 8's six mutating functions
+  (`move_desktop_to_monitor`, `add_desktop`, `remove_desktop`,
+  `remove_monitor`, `reset_padding`, `reorder_monitors`) — this task
+  changes their return type from `None` to `bool` (see Step 1b) so this
+  layer has a failure signal to act on, per the design spec's error
+  handling section ("surfaces the error rather than silently continuing
+  to the next step").
 - Produces:
+  - `ReconciliationError(RuntimeError)` — raised immediately when any
+    underlying `bspc` call fails, rather than continuing past it.
   - `retire_monitors(overflow_target: str, survivors: list[str]) -> None`
   - `assign_desktops(target: str, names: list[str]) -> None`
   - `sweep_placeholder_desktops(expected_names: set[str]) -> None`
@@ -1375,7 +1481,120 @@ def test_desktop_is_empty_false_when_a_window_node_matches():
         assert bc.desktop_is_empty("ide1") is False
 ```
 
-- [ ] **Step 2: Add `desktop_is_empty` to `bspc_client.py`**
+- [ ] **Step 1b: Update `test_bspc_client.py`'s existing mutating-function tests to also assert the new `bool` return value**
+
+Task 8 built these six functions to return `None`, matching the exact
+tests written then. This step changes that: each mutating function now
+returns whether its `bspc` call succeeded, so `reconcile.py` has
+something to check. Edit each existing test below (they already exist in
+`tests/backend/test_bspc_client.py` from Task 8) to add a success-path
+return-value assertion, and add one new failure-path test per function:
+
+```python
+# tests/backend/test_bspc_client.py — edit these EXISTING tests (from
+# Task 8) to add the marked assertion line, and add the new tests below
+# them. Everything else in each existing test (the fake, the patch, the
+# run.assert_called_once_with(...)) stays exactly as Task 8 wrote it.
+
+def test_move_desktop_to_monitor():
+    fake = MagicMock(returncode=0)
+    with patch("subprocess.run", return_value=fake) as run:
+        result = bc.move_desktop_to_monitor("pm", "DP-1")  # capture the return value
+    run.assert_called_once_with(
+        ["bspc", "desktop", "pm", "--to-monitor", "DP-1"], capture_output=True, text=True, check=False
+    )
+    assert result is True  # NEW assertion
+
+
+def test_move_desktop_to_monitor_returns_false_on_failure():
+    fake = MagicMock(returncode=1)
+    with patch("subprocess.run", return_value=fake):
+        assert bc.move_desktop_to_monitor("pm", "DP-1") is False
+
+
+def test_add_desktop():
+    fake = MagicMock(returncode=0)
+    with patch("subprocess.run", return_value=fake) as run:
+        result = bc.add_desktop("DP-1", "pm")  # capture the return value
+    run.assert_called_once_with(
+        ["bspc", "monitor", "DP-1", "-a", "pm"], capture_output=True, text=True, check=False
+    )
+    assert result is True  # NEW assertion
+
+
+def test_add_desktop_returns_false_on_failure():
+    fake = MagicMock(returncode=1)
+    with patch("subprocess.run", return_value=fake):
+        assert bc.add_desktop("DP-1", "pm") is False
+
+
+def test_remove_desktop():
+    fake = MagicMock(returncode=0)
+    with patch("subprocess.run", return_value=fake) as run:
+        result = bc.remove_desktop("ghost")  # capture the return value
+    run.assert_called_once_with(
+        ["bspc", "desktop", "ghost", "-r"], capture_output=True, text=True, check=False
+    )
+    assert result is True  # NEW assertion
+
+
+def test_remove_desktop_returns_false_on_failure():
+    fake = MagicMock(returncode=1)
+    with patch("subprocess.run", return_value=fake):
+        assert bc.remove_desktop("ghost") is False
+
+
+def test_remove_monitor():
+    fake = MagicMock(returncode=0)
+    with patch("subprocess.run", return_value=fake) as run:
+        result = bc.remove_monitor("HDMI-1")  # capture the return value
+    run.assert_called_once_with(
+        ["bspc", "monitor", "HDMI-1", "-r"], capture_output=True, text=True, check=False
+    )
+    assert result is True  # NEW assertion
+
+
+def test_remove_monitor_returns_false_on_failure():
+    fake = MagicMock(returncode=1)
+    with patch("subprocess.run", return_value=fake):
+        assert bc.remove_monitor("HDMI-1") is False
+
+
+def test_reset_padding_sets_all_four_edges_to_zero():
+    fake = MagicMock(returncode=0)
+    with patch("subprocess.run", return_value=fake) as run:
+        result = bc.reset_padding("eDP-1")  # capture the return value
+    assert run.call_count == 4
+    calls = [c.args[0] for c in run.call_args_list]
+    for edge in ("top_padding", "bottom_padding", "left_padding", "right_padding"):
+        assert ["bspc", "config", "-m", "eDP-1", edge, "0"] in calls
+    assert result is True  # NEW assertion
+
+
+def test_reset_padding_returns_false_if_any_edge_fails():
+    ok = MagicMock(returncode=0)
+    fail = MagicMock(returncode=1)
+    with patch("subprocess.run", side_effect=[ok, ok, fail, ok]):
+        assert bc.reset_padding("eDP-1") is False
+
+
+def test_reorder_monitors():
+    fake = MagicMock(returncode=0)
+    with patch("subprocess.run", return_value=fake) as run:
+        result = bc.reorder_monitors(["DP-1", "eDP-1", "DP-2"])  # capture the return value
+    run.assert_called_once_with(
+        ["bspc", "wm", "-O", "DP-1", "eDP-1", "DP-2"], capture_output=True, text=True, check=False
+    )
+    assert result is True  # NEW assertion
+
+
+def test_reorder_monitors_returns_false_on_failure():
+    fake = MagicMock(returncode=1)
+    with patch("subprocess.run", return_value=fake):
+        assert bc.reorder_monitors(["DP-1"]) is False
+```
+
+- [ ] **Step 2: Add `desktop_is_empty` to `bspc_client.py`, and change the six mutating functions to return `bool`**
 
 ```python
 # appended to src/bspwm_display_manager/backend/bspc_client.py
@@ -1384,17 +1603,57 @@ def desktop_is_empty(name: str) -> bool:
     return result.stdout.strip() == ""
 ```
 
-- [ ] **Step 3: Run to verify the new bspc_client tests pass**
+```python
+# REPLACE these six existing functions in
+# src/bspwm_display_manager/backend/bspc_client.py (from Task 8) with
+# these versions — same argv construction, now returning bool:
+
+def move_desktop_to_monitor(desktop: str, target: str) -> bool:
+    return _run(["desktop", desktop, "--to-monitor", target]).returncode == 0
+
+
+def add_desktop(monitor: str, name: str) -> bool:
+    return _run(["monitor", monitor, "-a", name]).returncode == 0
+
+
+def remove_desktop(name: str) -> bool:
+    return _run(["desktop", name, "-r"]).returncode == 0
+
+
+def remove_monitor(name: str) -> bool:
+    return _run(["monitor", name, "-r"]).returncode == 0
+
+
+def reset_padding(monitor: str) -> bool:
+    ok = True
+    for edge in _PADDING_EDGES:
+        if _run(["config", "-m", monitor, edge, "0"]).returncode != 0:
+            ok = False
+    return ok
+
+
+def reorder_monitors(order: list[str]) -> bool:
+    return _run(["wm", "-O", *order]).returncode == 0
+```
+
+- [ ] **Step 3: Run to verify the updated/new bspc_client tests pass**
 
 Run: `.venv/bin/pytest tests/backend/test_bspc_client.py -v`
-Expected: 12 passed
+Expected: 19 passed
 
 - [ ] **Step 4: Commit the bspc_client addition**
 
 ```bash
 git add src/bspwm_display_manager/backend/bspc_client.py tests/backend/test_bspc_client.py
 git commit -m "$(cat <<'EOF'
-Add bspc_client.desktop_is_empty
+Add bspc_client.desktop_is_empty; mutating functions now return bool
+
+The six mutating functions (move_desktop_to_monitor, add_desktop,
+remove_desktop, remove_monitor, reset_padding, reorder_monitors)
+previously discarded bspc's exit code entirely. reconcile.py (next in
+this task) needs a failure signal to fulfil the design spec's error
+handling requirement ("surfaces the error rather than silently
+continuing to the next step").
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01GeNU1czSEoSe9ivX3Zow2w
@@ -1408,6 +1667,8 @@ EOF
 # tests/backend/test_reconcile.py
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from bspwm_display_manager.backend import reconcile as rc
 
 
@@ -1416,16 +1677,27 @@ def test_retire_monitors_adds_placeholder_before_moving_desktops():
     must exist on the doomed monitor before any real desktop is moved
     off it, so no real desktop is ever "the last one" being moved."""
     calls = []
+
+    def _track(tag):
+        # Records the call AND reports success (True) -- bspc_client's
+        # mutating functions return bool, and reconcile.py now raises on
+        # a False, so every mock standing in for a "this call succeeded"
+        # scenario must return True, not None.
+        def _fn(*args):
+            calls.append((tag, *args))
+            return True
+        return _fn
+
     with patch("bspwm_display_manager.backend.reconcile.bspc_client.query_monitor_names",
                return_value=["eDP-1", "HDMI-1"]), \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.add_desktop",
-               side_effect=lambda mon, name: calls.append(("add_desktop", mon, name))), \
+               side_effect=_track("add_desktop")), \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.query_desktop_names",
                return_value=["ide1", "ide2", "__bsp_retiring__"]), \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.move_desktop_to_monitor",
-               side_effect=lambda d, t: calls.append(("move", d, t))), \
+               side_effect=_track("move")), \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.remove_monitor",
-               side_effect=lambda m: calls.append(("remove_monitor", m))):
+               side_effect=_track("remove_monitor")):
         rc.retire_monitors(overflow_target="eDP-1", survivors=["eDP-1"])
 
     assert calls[0] == ("add_desktop", "HDMI-1", "__bsp_retiring__")
@@ -1472,13 +1744,26 @@ def test_assign_desktops_never_calls_bspc_monitor_dash_d():
     real desktop_exists/move_desktop_to_monitor/add_desktop code paths
     run and their real argv reaches this assertion; mocking bspc_client
     itself here would make the assertion vacuous (nothing would ever
-    reach `-d` no matter what assign_desktops did)."""
-    fake = MagicMock(returncode=0, stdout="", stderr="")
-    with patch("subprocess.run", return_value=fake) as run:
+    reach `-d` no matter what assign_desktops did).
+
+    A plain `return_value=` stub (returncode=0 for every call) would
+    make `desktop_exists` report every name as existing, so only the
+    `--to-monitor` branch would ever run and the `-a` (create) branch —
+    the exact branch a `-a` vs `-d` typo would land in — would go
+    completely unexercised, closing a coverage gap without noticing.
+    This `side_effect` makes 'settings' report as not-existing so the
+    create branch genuinely executes too, under the same assertion."""
+    def _fake_run(argv, **kwargs):
+        if argv[:4] == ["bspc", "query", "-D", "-d"] and argv[4] == "settings":
+            return MagicMock(returncode=1, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_fake_run) as run:
         rc.assign_desktops("DP-1", ["pm", "office", "settings"])
-    assert run.call_count > 0  # confirms real bspc_client code actually ran
-    for call in run.call_args_list:
-        argv = call.args[0]
+    calls = [call.args[0] for call in run.call_args_list]
+    assert ["bspc", "desktop", "pm", "--to-monitor", "DP-1"] in calls
+    assert ["bspc", "monitor", "DP-1", "-a", "settings"] in calls  # confirms the create branch ran
+    for argv in calls:
         assert not (argv[:2] == ["bspc", "monitor"] and "-d" in argv)
 
 
@@ -1515,7 +1800,7 @@ def test_reconcile_runs_padding_then_assignment_then_reorder_then_sweep():
          patch("bspwm_display_manager.backend.reconcile.assign_desktops",
                side_effect=lambda t, n: order_seen.append("assign")), \
          patch("bspwm_display_manager.backend.reconcile.bspc_client.reorder_monitors",
-               side_effect=lambda o: order_seen.append("reorder")), \
+               side_effect=lambda o: order_seen.append("reorder") or True), \
          patch("bspwm_display_manager.backend.reconcile.sweep_placeholder_desktops",
                side_effect=lambda names: order_seen.append("sweep")):
         rc.reconcile(
@@ -1524,6 +1809,47 @@ def test_reconcile_runs_padding_then_assignment_then_reorder_then_sweep():
             order=["DP-1", "eDP-1"],
         )
     assert order_seen == ["padding", "assign", "assign", "reorder", "sweep"]
+
+
+def test_retire_monitors_raises_when_add_desktop_fails():
+    """A failed bspc call must stop this function rather than proceeding
+    to move desktops off a monitor whose placeholder was never actually
+    created."""
+    with patch("bspwm_display_manager.backend.reconcile.bspc_client.query_monitor_names",
+               return_value=["eDP-1", "HDMI-1"]), \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.add_desktop", return_value=False), \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.query_desktop_names") as query, \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.remove_monitor") as remove:
+        with pytest.raises(rc.ReconciliationError):
+            rc.retire_monitors(overflow_target="eDP-1", survivors=["eDP-1"])
+    query.assert_not_called()
+    remove.assert_not_called()
+
+
+def test_assign_desktops_raises_when_move_fails():
+    with patch("bspwm_display_manager.backend.reconcile.bspc_client.desktop_exists", return_value=True), \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.move_desktop_to_monitor",
+               return_value=False):
+        with pytest.raises(rc.ReconciliationError):
+            rc.assign_desktops("DP-1", ["pm"])
+
+
+def test_reset_active_padding_raises_when_reset_padding_fails():
+    with patch("bspwm_display_manager.backend.reconcile.bspc_client.reset_padding",
+               return_value=False):
+        with pytest.raises(rc.ReconciliationError):
+            rc.reset_active_padding(["eDP-1"])
+
+
+def test_reconcile_raises_when_reorder_fails():
+    with patch("bspwm_display_manager.backend.reconcile.reset_active_padding"), \
+         patch("bspwm_display_manager.backend.reconcile.assign_desktops"), \
+         patch("bspwm_display_manager.backend.reconcile.bspc_client.reorder_monitors",
+               return_value=False), \
+         patch("bspwm_display_manager.backend.reconcile.sweep_placeholder_desktops") as sweep:
+        with pytest.raises(rc.ReconciliationError):
+            rc.reconcile(active_monitors=["eDP-1"], desktop_assignment={"eDP-1": ["term"]}, order=["eDP-1"])
+    sweep.assert_not_called()
 ```
 
 - [ ] **Step 6: Run tests to verify they fail**
@@ -1542,6 +1868,12 @@ from bspwm_display_manager.backend import bspc_client
 _PLACEHOLDER = "__bsp_retiring__"
 
 
+class ReconciliationError(RuntimeError):
+    """A bspc call failed. Retirement and assignment are both idempotent
+    by construction, so the caller can safely retry the whole operation
+    rather than trying to resume mid-way."""
+
+
 def retire_monitors(overflow_target: str, survivors: list[str]) -> None:
     """Move every desktop off any monitor not in `survivors`, then
     remove that monitor. MUST be called before the xrandr command that
@@ -1554,12 +1886,15 @@ def retire_monitors(overflow_target: str, survivors: list[str]) -> None:
         # A monitor can never have zero desktops, so bspc refuses to move
         # its last one — add a disposable placeholder first so no real
         # desktop is ever "the last one" while being moved off.
-        bspc_client.add_desktop(mon, _PLACEHOLDER)
+        if not bspc_client.add_desktop(mon, _PLACEHOLDER):
+            raise ReconciliationError(f"failed to add placeholder desktop on {mon!r}")
         for desk in bspc_client.query_desktop_names(monitor=mon):
             if desk == _PLACEHOLDER:
                 continue
-            bspc_client.move_desktop_to_monitor(desk, overflow_target)
-        bspc_client.remove_monitor(mon)
+            if not bspc_client.move_desktop_to_monitor(desk, overflow_target):
+                raise ReconciliationError(f"failed to move desktop {desk!r} off {mon!r}")
+        if not bspc_client.remove_monitor(mon):
+            raise ReconciliationError(f"failed to remove monitor {mon!r}")
 
 
 def assign_desktops(target: str, names: list[str]) -> None:
@@ -1569,9 +1904,11 @@ def assign_desktops(target: str, names: list[str]) -> None:
     last name in the new list instead of releasing them elsewhere."""
     for name in names:
         if bspc_client.desktop_exists(name):
-            bspc_client.move_desktop_to_monitor(name, target)
+            if not bspc_client.move_desktop_to_monitor(name, target):
+                raise ReconciliationError(f"failed to move desktop {name!r} to {target!r}")
         else:
-            bspc_client.add_desktop(target, name)
+            if not bspc_client.add_desktop(target, name):
+                raise ReconciliationError(f"failed to add desktop {name!r} on {target!r}")
 
 
 def sweep_placeholder_desktops(expected_names: set[str]) -> None:
@@ -1582,12 +1919,14 @@ def sweep_placeholder_desktops(expected_names: set[str]) -> None:
         if name in expected_names:
             continue
         if bspc_client.desktop_is_empty(name):
-            bspc_client.remove_desktop(name)
+            if not bspc_client.remove_desktop(name):
+                raise ReconciliationError(f"failed to remove stray desktop {name!r}")
 
 
 def reset_active_padding(active_monitors: list[str]) -> None:
     for mon in active_monitors:
-        bspc_client.reset_padding(mon)
+        if not bspc_client.reset_padding(mon):
+            raise ReconciliationError(f"failed to reset padding on {mon!r}")
 
 
 def reconcile(
@@ -1601,7 +1940,8 @@ def reconcile(
     reset_active_padding(active_monitors)
     for target, names in desktop_assignment.items():
         assign_desktops(target, names)
-    bspc_client.reorder_monitors(order)
+    if not bspc_client.reorder_monitors(order):
+        raise ReconciliationError(f"failed to reorder monitors: {order!r}")
     expected = {name for names in desktop_assignment.values() for name in names}
     sweep_placeholder_desktops(expected)
 ```
@@ -1609,7 +1949,7 @@ def reconcile(
 - [ ] **Step 8: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/backend/test_reconcile.py -v`
-Expected: 9 passed
+Expected: 13 passed
 
 - [ ] **Step 9: Commit**
 
@@ -1622,7 +1962,9 @@ Generalizes the hard-won bspc edge cases documented in the design spec's
 Prior Art section: the last-desktop placeholder-move workaround, never
 using bspc monitor -d to reassign desktops (it folds dropped names into
 the last one instead of releasing them), and the empty-only placeholder
-desktop sweep.
+desktop sweep. Every bspc_client call is checked and raises
+ReconciliationError immediately on failure rather than continuing past
+it, per the design spec's error handling section.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01GeNU1czSEoSe9ivX3Zow2w
@@ -1744,23 +2086,35 @@ EOF
     output name it matches — exact EDID match first, else glob pattern
     match against the output name, e.g. `eDP-*`)
   - `apply_geometry(outputs: list[Output], overflow_target: str, survivors: list[str]) -> ApplyOutcome`
-    (retire, then xrandr apply — this is the GUI's pre-confirm step)
-  - `finish_reconciliation(profile: Profile, resolved: dict[str, str], order: list[str]) -> None`
+    (retire, then xrandr apply — this is the GUI's pre-confirm step;
+    catches Task 9's `reconcile.ReconciliationError` from `retire_monitors`
+    AND `OSError` from `xrandr_client.apply` — e.g. the `xrandr` binary
+    itself missing — reporting either as `ApplyOutcome(ok=False, ...)`
+    rather than raising, since `ApplyOutcome` is the whole contract
+    Task 18's GUI gates on)
+  - `finish_reconciliation(profile: Profile, resolved: dict[str, str], order: list[str]) -> ApplyOutcome`
     (scale env, desktop reconciliation, hooks — this is the GUI's
-    post-confirm step)
+    post-confirm step; catches `reconcile.ReconciliationError` from
+    `reconcile.reconcile` AND `OSError` from `apply_scale_env` the same
+    way)
   - `replay_profile(profile: Profile) -> ApplyOutcome` (the full
     non-interactive CLI/daemon path: resolve → apply_geometry →
-    finish_reconciliation)
+    finish_reconciliation — returns whichever `ApplyOutcome` reflects the
+    actual failure point, so callers never need to know about
+    `ReconciliationError` at all)
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/backend/test_apply.py
-import pytest
+from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+from bspwm_display_manager.backend import reconcile
 from bspwm_display_manager.backend.apply import (
-    ApplyOutcome, apply_geometry, finish_reconciliation, replay_profile, resolve_targets,
+    ApplyOutcome, apply_geometry, apply_scale_env, finish_reconciliation, replay_profile, resolve_targets,
 )
 from bspwm_display_manager.backend.models import LayoutState, Mode, Output
 from bspwm_display_manager.backend.profile import OutputSpec, Profile
@@ -1824,8 +2178,43 @@ def test_finish_reconciliation_runs_scale_then_reconcile_then_hooks():
                side_effect=lambda **kw: order_seen.append("reconcile")), \
          patch("bspwm_display_manager.backend.apply.hooks.run_hooks",
                side_effect=lambda cmds: order_seen.append("hooks")):
-        finish_reconciliation(_profile(), {"edid-dell": "DP-1", "eDP-*": "eDP-1"}, ["DP-1", "eDP-1"])
+        outcome = finish_reconciliation(_profile(), {"edid-dell": "DP-1", "eDP-*": "eDP-1"}, ["DP-1", "eDP-1"])
     assert order_seen == ["scale", "reconcile", "hooks"]
+    assert outcome.ok is True
+
+
+def test_finish_reconciliation_returns_failure_outcome_when_reconcile_raises():
+    """reconcile.reconcile can raise ReconciliationError (Task 9) --
+    finish_reconciliation must catch it and report failure through
+    ApplyOutcome rather than letting it propagate as a raw exception
+    into the CLI/GUI layers. `resolved` must cover every key in
+    _profile()'s desktop_assignment (edid-dell AND eDP-*) -- in the real
+    pipeline resolve_targets() guarantees this for every key that
+    appears in profile.outputs (and desktop_assignment keys are always a
+    subset of those), so finish_reconciliation's dict comprehension is
+    entitled to assume it; passing a partial resolved dict here would
+    raise KeyError before reconcile.reconcile is ever reached, which
+    would test the wrong thing."""
+    with patch("bspwm_display_manager.backend.apply.apply_scale_env"), \
+         patch("bspwm_display_manager.backend.apply.reconcile.reconcile",
+               side_effect=reconcile.ReconciliationError("failed to reorder monitors")), \
+         patch("bspwm_display_manager.backend.apply.hooks.run_hooks") as hooks_run:
+        outcome = finish_reconciliation(
+            _profile(), {"edid-dell": "DP-1", "eDP-*": "eDP-1"}, ["DP-1", "eDP-1"]
+        )
+    assert outcome.ok is False
+    assert "failed to reorder monitors" in outcome.message
+    hooks_run.assert_not_called()
+
+
+def test_apply_geometry_returns_failure_outcome_when_retire_raises():
+    with patch("bspwm_display_manager.backend.apply.reconcile.retire_monitors",
+               side_effect=reconcile.ReconciliationError("failed to remove monitor 'HDMI-1'")), \
+         patch("bspwm_display_manager.backend.apply.xrandr_client.apply") as xrandr_apply:
+        outcome = apply_geometry([], overflow_target="eDP-1", survivors=["eDP-1"])
+    assert outcome.ok is False
+    assert "failed to remove monitor" in outcome.message
+    xrandr_apply.assert_not_called()
 
 
 def test_replay_profile_runs_the_full_pipeline_in_order():
@@ -1835,7 +2224,7 @@ def test_replay_profile_runs_the_full_pipeline_in_order():
          patch("bspwm_display_manager.backend.apply.apply_geometry",
                side_effect=lambda *a, **kw: order_seen.append("geometry") or ApplyOutcome(ok=True, message="")), \
          patch("bspwm_display_manager.backend.apply.finish_reconciliation",
-               side_effect=lambda *a, **kw: order_seen.append("finish")):
+               side_effect=lambda *a, **kw: order_seen.append("finish") or ApplyOutcome(ok=True, message="")):
         outcome = replay_profile(_profile())
     assert order_seen == ["geometry", "finish"]
     assert outcome.ok is True
@@ -1851,6 +2240,69 @@ def test_replay_profile_skips_reconciliation_when_geometry_apply_fails():
     finish.assert_not_called()
     assert outcome.ok is False
     assert "bad mode" in outcome.message
+
+
+def test_replay_profile_returns_finish_reconciliations_outcome():
+    with patch("bspwm_display_manager.backend.apply.xrandr_client.query_verbose", return_value=""), \
+         patch("bspwm_display_manager.backend.apply.xrandr_parser.parse_verbose", return_value=_state()), \
+         patch("bspwm_display_manager.backend.apply.apply_geometry",
+               return_value=ApplyOutcome(ok=True, message="")), \
+         patch("bspwm_display_manager.backend.apply.finish_reconciliation",
+               return_value=ApplyOutcome(ok=False, message="failed to reset padding on 'eDP-1'")):
+        outcome = replay_profile(_profile())
+    assert outcome.ok is False
+    assert "failed to reset padding" in outcome.message
+
+
+def test_apply_geometry_returns_failure_outcome_when_xrandr_apply_raises():
+    """ApplyOutcome is the whole contract Task 18's GUI gates on -- an
+    OSError (e.g. the xrandr binary itself is missing) must not escape
+    as a raw exception any more than a ReconciliationError may."""
+    with patch("bspwm_display_manager.backend.apply.reconcile.retire_monitors"), \
+         patch("bspwm_display_manager.backend.apply.xrandr_client.apply",
+               side_effect=FileNotFoundError("[Errno 2] No such file or directory: 'xrandr'")):
+        outcome = apply_geometry([], overflow_target="eDP-1", survivors=["eDP-1"])
+    assert outcome.ok is False
+    assert "xrandr" in outcome.message
+
+
+def test_finish_reconciliation_returns_failure_outcome_when_apply_scale_env_raises():
+    """Same contract for finish_reconciliation: apply_scale_env writes a
+    real file and shells out to xrdb, both of which can raise OSError
+    (e.g. permission denied, xrdb missing)."""
+    with patch("bspwm_display_manager.backend.apply.apply_scale_env",
+               side_effect=OSError("[Errno 13] Permission denied")), \
+         patch("bspwm_display_manager.backend.apply.reconcile.reconcile") as reconcile_fn, \
+         patch("bspwm_display_manager.backend.apply.hooks.run_hooks") as hooks_run:
+        outcome = finish_reconciliation(
+            _profile(), {"edid-dell": "DP-1", "eDP-*": "eDP-1"}, ["DP-1", "eDP-1"]
+        )
+    assert outcome.ok is False
+    assert "Permission denied" in outcome.message
+    reconcile_fn.assert_not_called()
+    hooks_run.assert_not_called()
+
+
+def test_apply_scale_env_writes_env_file_and_merges_xft_dpi_via_xrdb(tmp_path, monkeypatch):
+    """The only test that actually exercises apply_scale_env's body —
+    every other test in this file patches it out, since it's the one
+    function here with real side effects (a real file write, a real
+    subprocess call to xrdb). Redirects HOME to tmp_path and mocks
+    subprocess.run so this never touches the real machine, however this
+    test is invoked."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with patch("bspwm_display_manager.backend.apply.subprocess.run") as run:
+        apply_scale_env(150)
+
+    run.assert_called_once_with(
+        ["xrdb", "-merge"], input="Xft.dpi: 144\n", text=True, check=False
+    )
+    env_file = tmp_path / ".config" / "bspwm-display-manager" / "env"
+    content = env_file.read_text()
+    assert "export GDK_SCALE=1.5\n" in content
+    assert "export QT_SCALE_FACTOR=1.5\n" in content
+    assert "export QT_AUTO_SCREEN_SCALE_FACTOR=0\n" in content
+    assert "Xft.dpi" not in content  # Xft.dpi goes to xrdb, not the env file
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1909,9 +2361,18 @@ def _outputs_for_apply(profile: Profile, resolved: dict[str, str]) -> list[Outpu
 
 
 def apply_geometry(outputs: list[Output], overflow_target: str, survivors: list[str]) -> ApplyOutcome:
-    reconcile.retire_monitors(overflow_target=overflow_target, survivors=survivors)
+    try:
+        reconcile.retire_monitors(overflow_target=overflow_target, survivors=survivors)
+    except reconcile.ReconciliationError as exc:
+        return ApplyOutcome(ok=False, message=str(exc))
     args = command_builder.build_xrandr_args(outputs)
-    result = xrandr_client.apply(args)
+    try:
+        result = xrandr_client.apply(args)
+    except OSError as exc:
+        # e.g. the xrandr binary itself is missing -- ApplyOutcome is the
+        # whole contract Task 18's GUI gates on, so this must not escape
+        # as a raw exception any more than ReconciliationError may.
+        return ApplyOutcome(ok=False, message=str(exc))
     return ApplyOutcome(ok=result.ok, message=result.stderr)
 
 
@@ -1925,13 +2386,23 @@ def apply_scale_env(percent: int) -> None:
     env_path.write_text("".join(lines))
 
 
-def finish_reconciliation(profile: Profile, resolved: dict[str, str], order: list[str]) -> None:
-    apply_scale_env(profile.scale_percent)
+def finish_reconciliation(profile: Profile, resolved: dict[str, str], order: list[str]) -> ApplyOutcome:
+    try:
+        apply_scale_env(profile.scale_percent)
+    except OSError as exc:
+        # apply_scale_env writes a real file and shells out to xrdb --
+        # both can raise (permission denied, xrdb missing). Same
+        # never-raise contract as the ReconciliationError handling below.
+        return ApplyOutcome(ok=False, message=str(exc))
     desktop_assignment = {
         resolved[pattern]: names for pattern, names in profile.desktop_assignment.items()
     }
-    reconcile.reconcile(active_monitors=order, desktop_assignment=desktop_assignment, order=order)
+    try:
+        reconcile.reconcile(active_monitors=order, desktop_assignment=desktop_assignment, order=order)
+    except reconcile.ReconciliationError as exc:
+        return ApplyOutcome(ok=False, message=str(exc))
     hooks.run_hooks(profile.hooks)
+    return ApplyOutcome(ok=True, message="")
 
 
 def replay_profile(profile: Profile) -> ApplyOutcome:
@@ -1945,19 +2416,19 @@ def replay_profile(profile: Profile) -> ApplyOutcome:
     outcome = apply_geometry(outputs, overflow_target=overflow_target, survivors=order)
     if not outcome.ok:
         return outcome
-    finish_reconciliation(profile, resolved, order)
-    return outcome
+    return finish_reconciliation(profile, resolved, order)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/backend/test_apply.py -v`
-Expected: 6 passed
+Expected: 12 passed
 
 - [ ] **Step 5: Run the full backend test suite**
 
 Run: `.venv/bin/pytest tests/backend -v`
-Expected: all tests from Tasks 2-11 pass (around 60 tests).
+Expected: all tests from Tasks 2-11 pass (around 80 tests — the exact
+count isn't load-bearing, just confirm zero failures).
 
 - [ ] **Step 6: Commit**
 
@@ -2298,6 +2769,18 @@ def test_positions_round_trips_through_the_scale_factor(qapp):
     assert canvas.positions() == {"DP-1": (100, 200)}
 
 
+def test_positions_round_trips_a_position_not_divisible_by_scale_down(qapp):
+    """SCALE_DOWN is 10 -- a position like x=105 isn't a clean multiple
+    of it. Regression test for a version that used integer floor
+    division on the way in (out.x // SCALE_DOWN, discarding the
+    remainder) and couldn't recover it on the way out; 105 silently
+    became 100. Real monitor positions are not guaranteed to land on
+    multiples of 10."""
+    canvas = DisplayCanvas()
+    canvas.set_outputs([_output("DP-1", 2560, 1440, 105, 207)])
+    assert canvas.positions() == {"DP-1": (105, 207)}
+
+
 def test_set_outputs_clears_previous_items(qapp):
     canvas = DisplayCanvas()
     canvas.set_outputs([_output("DP-1", 2560, 1440, 0, 0)])
@@ -2316,7 +2799,6 @@ Expected: FAIL with `ModuleNotFoundError`
 # src/bspwm_display_manager/ui/canvas.py
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF
 from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
 )
@@ -2329,7 +2811,7 @@ SNAP_THRESHOLD = 15  # scene units
 
 
 class MonitorItem(QGraphicsRectItem):
-    def __init__(self, output_name: str, w: int, h: int):
+    def __init__(self, output_name: str, w: float, h: float):
         super().__init__(0, 0, w, h)
         self.output_name = output_name
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -2338,13 +2820,18 @@ class MonitorItem(QGraphicsRectItem):
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene() is not None:
+            # Rounded to int here for the snap-candidate arithmetic only
+            # (snapping is threshold-based, not exact); real-pixel
+            # positions stay float scene coordinates everywhere else so
+            # positions() can round-trip a value that isn't a multiple
+            # of SCALE_DOWN.
             others = [
-                Rect(int(item.x()), int(item.y()), int(item.rect().width()), int(item.rect().height()))
+                Rect(round(item.x()), round(item.y()), round(item.rect().width()), round(item.rect().height()))
                 for item in self.scene().items()
                 if isinstance(item, MonitorItem) and item is not self
             ]
-            dragged = Rect(int(value.x()), int(value.y()),
-                            int(self.rect().width()), int(self.rect().height()))
+            dragged = Rect(round(value.x()), round(value.y()),
+                            round(self.rect().width()), round(self.rect().height()))
             snapped_x, snapped_y = compute_snap(dragged, others, SNAP_THRESHOLD)
             value.setX(snapped_x)
             value.setY(snapped_y)
@@ -2363,22 +2850,31 @@ class DisplayCanvas(QGraphicsView):
             mode = out.current_mode() or out.preferred_mode()
             if mode is None:
                 continue
-            item = MonitorItem(out.name, mode.width // SCALE_DOWN, mode.height // SCALE_DOWN)
-            item.setPos(out.x // SCALE_DOWN, out.y // SCALE_DOWN)
+            # True (float) division, not floor division: a position or
+            # size that isn't a multiple of SCALE_DOWN must still
+            # round-trip exactly through positions() below. Floor
+            # division would discard the remainder permanently.
+            item = MonitorItem(out.name, mode.width / SCALE_DOWN, mode.height / SCALE_DOWN)
+            item.setPos(out.x / SCALE_DOWN, out.y / SCALE_DOWN)
             self._scene.addItem(item)
 
     def positions(self) -> dict[str, tuple[int, int]]:
         result = {}
         for item in self._scene.items():
             if isinstance(item, MonitorItem):
-                result[item.output_name] = (int(item.x()) * SCALE_DOWN, int(item.y()) * SCALE_DOWN)
+                # round(), not int(): item.x()/y() are floats and binary
+                # floating point can't represent every decimal exactly
+                # (e.g. 10.7), but the error is many orders of magnitude
+                # smaller than 0.5, so round() always recovers the exact
+                # original integer pixel value.
+                result[item.output_name] = (round(item.x() * SCALE_DOWN), round(item.y() * SCALE_DOWN))
         return result
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/ui/test_canvas.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 5: Manual verification**
 
@@ -3015,6 +3511,30 @@ def test_main_window_constructs_and_populates_from_system_state(qapp):
     assert len(window.canvas.scene().items()) == 1
     assert window.load_combo.count() == 1
     assert window.desktop_panel.assignment() == {"eDP-1": ["term"]}
+
+
+def test_collect_outputs_for_apply_forces_other_outputs_non_primary_when_selected_becomes_primary(qapp):
+    """Regression test: xrandr rejects (or behaves ambiguously on) a
+    command with more than one --primary flag. eDP-1 is primary in the
+    dual_office fixture; selecting DP-1 in output_select_combo and
+    checking its Primary box must clear eDP-1's primary flag in the
+    outputs _collect_outputs_for_apply builds, not just add a second
+    one."""
+    from bspwm_display_manager.ui.main_window import MainWindow
+
+    fixture = (Path(__file__).parent.parent / "fixtures" / "xrandr_verbose_dual_office.txt").read_text()
+    with patch("bspwm_display_manager.ui.main_window.xrandr_client.query_verbose", return_value=fixture), \
+         patch("bspwm_display_manager.ui.main_window.bspc_client.query_desktop_names", return_value=[]), \
+         patch("bspwm_display_manager.ui.main_window.profile_store.list_profiles", return_value=[]):
+        window = MainWindow()
+
+    window.output_select_combo.setCurrentText("DP-1")
+    assert window.output_panel.output.name == "DP-1"
+    window.output_panel.primary_checkbox.setChecked(True)
+
+    outputs = window._collect_outputs_for_apply()
+    primaries = [o.name for o in outputs if o.primary]
+    assert primaries == ["DP-1"]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -3128,10 +3648,17 @@ class MainWindow(QMainWindow):
         currently loaded in output_panel — that panel's edited
         mode/rate/primary/scale merged in. output_panel edits only one
         output at a time; _on_output_selected keeps it in sync with
-        output_select_combo."""
+        output_select_combo.
+
+        If the panel's edit makes the selected output primary, every
+        OTHER output is forced non-primary here — xrandr rejects (or
+        behaves ambiguously on) a command with more than one --primary
+        flag, and _last_good_outputs may still have a stale primary on a
+        different output from before this edit."""
         positions = self.canvas.positions()
         selected = self.output_panel.output
         selection = self.output_panel.current_selection() if selected is not None else None
+        new_primary_forces_others_off = selection is not None and selection["primary"]
 
         outputs = []
         for out in self._last_good_outputs:
@@ -3146,8 +3673,9 @@ class MainWindow(QMainWindow):
                     scale_x=selection["scale"], scale_y=selection["scale"], modes=[mode],
                 ))
             else:
+                primary = False if new_primary_forces_others_off else out.primary
                 outputs.append(Output(
-                    name=out.name, connected=True, primary=out.primary, edid=out.edid,
+                    name=out.name, connected=True, primary=primary, edid=out.edid,
                     x=x, y=y, rotation=out.rotation, scale_x=out.scale_x, scale_y=out.scale_y,
                     modes=out.modes,
                 ))
@@ -3173,13 +3701,20 @@ class MainWindow(QMainWindow):
                 name="__pending__", fingerprint="", scale_percent=self.scale_control.value(),
                 outputs=[], desktop_assignment=self.desktop_panel.assignment(), hooks=[],
             )
-            apply.finish_reconciliation(profile, resolved, order)
+            reconcile_outcome = apply.finish_reconciliation(profile, resolved, order)
+            if not reconcile_outcome.ok:
+                QMessageBox.critical(self, "Apply failed", reconcile_outcome.message)
             self._last_good_outputs = outputs
         else:
             prev = self._last_good_outputs
             prev_order = [o.name for o in prev]
             prev_primary = next((o.name for o in prev if o.primary), prev_order[0])
-            apply.apply_geometry(prev, overflow_target=prev_primary, survivors=prev_order)
+            revert_outcome = apply.apply_geometry(prev, overflow_target=prev_primary, survivors=prev_order)
+            if not revert_outcome.ok:
+                # The single worst state this dialog exists to prevent:
+                # a failed revert with no explanation. Always tell the
+                # user, since there's no further fallback to try.
+                QMessageBox.critical(self, "Revert failed", revert_outcome.message)
         self._refresh_from_system()
 
     def _on_save(self) -> None:
@@ -3202,14 +3737,28 @@ class MainWindow(QMainWindow):
             scale_percent=self.scale_control.value(), outputs=specs,
             desktop_assignment=self.desktop_panel.assignment(), hooks=[],
         )
-        profile_store.save(profile, PROFILES_DIR)
-        self._refresh_from_system()
+        try:
+            profile_store.save(profile, PROFILES_DIR)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        # Deliberately NOT a full _refresh_from_system(): that would
+        # re-query live xrandr/bspc state and snap the canvas back to
+        # the current on-screen layout, discarding the arrangement the
+        # user just saved (and about to Apply). Only the profile list
+        # needs to reflect the new save.
+        self.load_combo.clear()
+        self.load_combo.addItems(profile_store.list_profiles(PROFILES_DIR))
 
     def _on_load(self) -> None:
         name = self.load_combo.currentText()
         if not name:
             return
-        profile = profile_store.load(name, PROFILES_DIR)
+        try:
+            profile = profile_store.load(name, PROFILES_DIR)
+        except FileNotFoundError as exc:
+            QMessageBox.critical(self, "Load failed", str(exc))
+            return
         try:
             outcome = apply.replay_profile(profile)
         except ValueError as exc:
@@ -3259,10 +3808,10 @@ def run() -> int:
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/ui/test_main_window.py -v`
-Expected: 1 passed
+Expected: 2 passed
 
 Run: `.venv/bin/pytest tests/test_cli.py -v`
-Expected: still 3 passed (the `gui` subcommand has no automated test —
+Expected: still 4 passed (the `gui` subcommand has no automated test —
 it launches a real Qt event loop, verified manually in Step 7)
 
 - [ ] **Step 7: Manual verification**
